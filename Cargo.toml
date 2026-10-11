@@ -1,0 +1,18 @@
+[package]
+name = "stl-viewer"
+version = "0.1.0"
+edition = "2021"
+description = "A simple cross-platform STL file viewer"
+
+[dependencies]
+wgpu = "0.20"
+winit = "0.29"
+glam = "0.27"
+bytemuck = { version = "1", features = ["derive"] }
+pollster = "0.3"
+env_logger = "0.11"
+log = "0.4"
+rfd = "0.17"
+egui = "0.28"
+egui-winit = { version = "0.28", default-features = false, features = ["clipboard", "links"] }
+egui-wgpu = { version = "0.28", features = ["winit"] }
