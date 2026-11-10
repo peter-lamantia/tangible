@@ -546,13 +546,15 @@ fn format_number(n: usize) -> String {
 }
 
 fn plate_preview(mesh: &stl::Mesh) -> egui::ColorImage {
-    const SIZE: usize = 320;
-    let background = egui::Color32::from_rgb(32, 39, 49);
+    const SIZE: usize = 400;
+    let background = egui::Color32::TRANSPARENT;
     let mut image = egui::ColorImage::new([SIZE, SIZE], background);
     if mesh.vertices.is_empty() {
         return image;
     }
-    let mut depth = vec![f32::INFINITY; SIZE * SIZE];
+    const SAMPLES: [(f32, f32); 4] = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)];
+    let mut depth = vec![f32::INFINITY; SIZE * SIZE * SAMPLES.len()];
+    let mut colors = vec![background; SIZE * SIZE * SAMPLES.len()];
     let mut camera = camera::Camera::new(mesh.center(), 5.0);
     camera.aspect = 1.0;
     camera.frame_target(mesh.center(), mesh.extent());
@@ -631,8 +633,9 @@ fn plate_preview(mesh: &stl::Mesh) -> egui::ColorImage {
         );
         for y in y_min..=y_max {
             for x in x_min..=x_max {
-                let px = x as f32 + 0.5;
-                let py = y as f32 + 0.5;
+                for (sample, (dx, dy)) in SAMPLES.iter().enumerate() {
+                let px = x as f32 + dx;
+                let py = y as f32 + dy;
                 let w0 = edge(screen[1], screen[2], px, py) / area;
                 let w1 = edge(screen[2], screen[0], px, py) / area;
                 let w2 = 1.0 - w0 - w1;
@@ -640,13 +643,26 @@ fn plate_preview(mesh: &stl::Mesh) -> egui::ColorImage {
                     continue;
                 }
                 let z = w0 * screen[0][2] + w1 * screen[1][2] + w2 * screen[2][2];
-                let index = y * SIZE + x;
+                let index = (y * SIZE + x) * SAMPLES.len() + sample;
                 if z < depth[index] {
                     depth[index] = z;
-                    image[(x, y)] = color;
+                    colors[index] = color;
+                }
                 }
             }
         }
+    }
+    for (pixel, samples) in image.pixels.iter_mut().zip(colors.chunks_exact(SAMPLES.len())) {
+        let mut sum = [0u32; 4];
+        for sample in samples {
+            for (total, channel) in sum.iter_mut().zip(sample.to_array()) {
+                *total += u32::from(channel);
+            }
+        }
+        *pixel = egui::Color32::from_rgba_premultiplied(
+            (sum[0] / 4) as u8, (sum[1] / 4) as u8,
+            (sum[2] / 4) as u8, (sum[3] / 4) as u8,
+        );
     }
     image
 }
@@ -657,20 +673,33 @@ fn plate_tile(
     texture: &egui::TextureHandle,
     selected: bool,
 ) -> bool {
-    let width = (ui.available_width() - 8.0).clamp(120.0, 360.0);
+    let width = (ui.available_width() - 8.0).clamp(16.0, 360.0);
     let image_size = width - 16.0;
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(width, image_size + 44.0), egui::Sense::click());
     let fill = if selected {
-        ui.visuals().selection.bg_fill
+        egui::Color32::from_rgb(30, 75, 160)
+    } else if ui.visuals().dark_mode {
+        egui::Color32::from_rgb(38, 41, 50)
     } else {
-        ui.visuals().faint_bg_color
+        egui::Color32::from_rgb(235, 238, 242)
+    };
+    let text_color = if selected || ui.visuals().dark_mode {
+        egui::Color32::WHITE
+    } else {
+        egui::Color32::from_rgb(24, 26, 32)
     };
     ui.painter().rect_filled(rect, 6.0, fill);
     let image_rect = egui::Rect::from_min_size(
         rect.min + egui::vec2(8.0, 8.0),
         egui::vec2(image_size, image_size),
     );
+    let preview_bg = if ui.visuals().dark_mode {
+        egui::Color32::from_rgb(32, 39, 49)
+    } else {
+        egui::Color32::from_rgb(235, 238, 242)
+    };
+    ui.painter().rect_filled(image_rect, 0.0, preview_bg);
     ui.painter().image(
         texture.id(),
         image_rect,
@@ -682,7 +711,7 @@ fn plate_tile(
         egui::Align2::CENTER_CENTER,
         label,
         egui::TextStyle::Body.resolve(ui.style()),
-        ui.visuals().text_color(),
+        text_color,
     );
     ui.add_space(8.0);
     response.clicked()
@@ -710,11 +739,11 @@ fn plate_preview_renders_geometry() {
         bounds_max: glam::Vec3::new(1.0, 1.0, 0.0),
     };
     let preview = plate_preview(&mesh);
-    assert_eq!(preview.size, [320, 320]);
+    assert_eq!(preview.size, [400, 400]);
     assert!(preview
         .pixels
         .iter()
-        .any(|pixel| *pixel != egui::Color32::from_rgb(32, 39, 49)));
+        .any(|pixel| *pixel != egui::Color32::TRANSPARENT));
 }
 
 /// Spawns the native file picker on a background thread so the window event loop never freezes.
@@ -765,9 +794,17 @@ fn main() {
         None
     };
 
-    let event_loop: EventLoop<AppEvent> = EventLoopBuilder::<AppEvent>::with_user_event()
-        .build()
-        .unwrap();
+    let mut event_loop_builder = EventLoopBuilder::<AppEvent>::with_user_event();
+    // winit 0.29 does not deliver file-drop events on Wayland. Prefer X11
+    // (including XWayland) when available, unless the user chose a backend.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WINIT_UNIX_BACKEND").is_none()
+        && std::env::var_os("DISPLAY").is_some()
+    {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        event_loop_builder.with_x11();
+    }
+    let event_loop: EventLoop<AppEvent> = event_loop_builder.build().unwrap();
     let proxy = event_loop.create_proxy();
 
     let window = Arc::new(
@@ -817,6 +854,13 @@ fn main() {
     let mut all_preview: Option<egui::TextureHandle> = None;
     let mut selected_plate: Option<usize> = None;
     let mut plates_collapsed = false;
+    let mut cube_offset = egui::vec2(0.0, -600.0);
+    let mut cube_velocity = egui::Vec2::ZERO;
+    let mut cube_last_time = std::time::Instant::now();
+    let mut cube_dragged = false;
+    let mut cube_angle: f32 = 0.0;
+    let mut cube_spin: f32 = 0.0;
+    let mut cube_entered = false;
 
     // Load initial file in background if specified via CLI
     if let Some(path) = initial_path {
@@ -1036,18 +1080,18 @@ fn main() {
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
-                                                if gpu.msaa_supported {
-                                                    let mut enabled = gpu.sample_count > 1;
-                                                    if ui.checkbox(&mut enabled, "4× AA").on_hover_text("Smooth 3D model edges with 4× MSAA").changed() {
-                                                        gpu.set_antialiasing(enabled);
-                                                    }
-                                                    ui.add_space(10.0);
-                                                }
                                                 if theme::theme_segmented_control(
                                                     ui,
                                                     &mut theme_pref,
                                                 ) {
                                                     should_update_theme = true;
+                                                }
+                                                if gpu.msaa_supported {
+                                                    ui.add_space(10.0);
+                                                    let mut enabled = gpu.sample_count > 1;
+                                                    if ui.checkbox(&mut enabled, "4× AA").on_hover_text("Smooth 3D model edges with 4× MSAA").changed() {
+                                                        gpu.set_antialiasing(enabled);
+                                                    }
                                                 }
 
                                             },
@@ -1087,16 +1131,29 @@ fn main() {
                                             .resizable(true)
                                             .default_width(176.0)
                                             .width_range(160.0..=400.0)
+                                            .frame(egui::Frame::side_top_panel(&ctx.style()).inner_margin(egui::Margin {
+                                                left: 8.0, right: 2.0, top: 2.0, bottom: 2.0,
+                                            }))
                                             .show(ctx, |ui| {
-                                                ui.horizontal(|ui| {
-                                                    ui.heading("Plates");
-                                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                                        if ui.button("◀").on_hover_text("Minimize plates panel").clicked() {
-                                                            plates_collapsed = true;
-                                                        }
-                                                    });
-                                                });
+                                                let (header, header_response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), egui::Sense::click());
+                                                if header_response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Minimize plates panel").clicked() {
+                                                    plates_collapsed = true;
+                                                }
+                                                let mut header_ui = ui.child_ui(
+                                                    header.shrink2(egui::vec2(6.0, 0.0)),
+                                                    egui::Layout::left_to_right(egui::Align::Center),
+                                                    None,
+                                                );
+                                                if header_ui.add(egui::Label::new(egui::RichText::new("Plates").heading()).sense(egui::Sense::click()))
+                                                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                                                    .on_hover_text("Minimize plates panel")
+                                                    .clicked()
+                                                {
+                                                    plates_collapsed = true;
+                                                }
                                                 ui.separator();
+                                                ui.style_mut().spacing.scroll.floating = false;
+                                                ui.style_mut().spacing.scroll.bar_inner_margin = 6.0;
                                                 egui::ScrollArea::vertical().show(ui, |ui| {
                                                     if plate_tile(ui, "All plates", all_preview.as_ref().unwrap(), selected_plate.is_none()) {
                                                         requested_plate = Some(None);
@@ -1185,25 +1242,11 @@ fn main() {
                             // ── Welcome Screen (when no model loaded) ────────────
                             if file_info.is_none() {
                                 egui::CentralPanel::default()
-                                    .frame(egui::Frame::none())
+                                    .frame(egui::Frame::none().fill(if is_dark { egui::Color32::from_rgb(20, 22, 27) } else { egui::Color32::from_rgb(246, 247, 249) }))
                                     .show(ctx, |ui| {
                                         let available = ui.available_rect_before_wrap();
                                         let card_w = 380.0_f32;
                                         let card_inner = 32.0_f32;
-
-                                        let card_bg = if is_dark {
-                                            egui::Color32::from_rgba_unmultiplied(20, 22, 27, 240)
-                                        } else {
-                                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 245)
-                                        };
-                                        let card_stroke = egui::Stroke::new(
-                                            1.0,
-                                            if is_dark {
-                                                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 24)
-                                            } else {
-                                                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 22)
-                                            },
-                                        );
 
                                         // Measure card height by running a dry layout pass
                                         let card_height = {
@@ -1228,20 +1271,77 @@ fn main() {
                                             ),
                                             |ui| {
                                                 egui::Frame::none()
-                                                    .fill(card_bg)
-                                                    .stroke(card_stroke)
-                                                    .rounding(egui::Rounding::same(12.0))
-                                                    .shadow(ui.visuals().window_shadow)
                                                     .inner_margin(card_inner)
                                                     .show(ui, |ui| {
                                                         ui.set_min_width(card_w);
                                                         ui.set_max_width(card_w);
                                                         ui.vertical_centered(|ui| {
-                                                            ui.add(
-                                                                egui::Image::new((cube_texture.id(), egui::vec2(72.0, 72.0)))
-                                                                    .fit_to_exact_size(egui::vec2(72.0, 72.0)),
-                                                            );
-                                                            ui.add_space(8.0);
+                                                            let (slot, _) = ui.allocate_exact_size(egui::vec2(72.0, 72.0), egui::Sense::hover());
+                                                            let floor = slot.bottom() + 16.0;
+                                                            let radius = 51.0_f32;
+                                                            let base = egui::pos2(slot.center().x, floor - radius);
+                                                            ui.painter().line_segment([egui::pos2(available.left(), floor), egui::pos2(available.right(), floor)], egui::Stroke::new(1.0, if is_dark { egui::Color32::from_gray(80) } else { egui::Color32::from_gray(190) }));
+                                                            let dt = cube_last_time.elapsed().as_secs_f32().min(0.033);
+                                                            cube_last_time = std::time::Instant::now();
+                                                            if !cube_dragged {
+                                                                cube_velocity.y += 1400.0 * dt;
+                                                                cube_offset += cube_velocity * dt;
+                                                                cube_angle += cube_spin * dt;
+                                                                cube_spin *= (-0.4 * dt).exp();
+                                                                if cube_offset.y >= 0.0 {
+                                                                    cube_offset.y = 0.0;
+                                                                    if cube_velocity.y > 35.0 {
+                                                                        cube_velocity.y *= -0.48;
+                                                                        cube_velocity.x *= 0.8;
+                                                                        cube_spin *= 0.75;
+                                                                    } else {
+                                                                        cube_velocity = egui::Vec2::ZERO;
+                                                                        cube_spin = 0.0;
+                                                                    }
+                                                                }
+                                                                let min_x = available.left() + radius - base.x;
+                                                                let max_x = available.right() - radius - base.x;
+                                                                if cube_offset.x < min_x || cube_offset.x > max_x {
+                                                                    cube_offset.x = cube_offset.x.clamp(min_x.min(max_x), max_x.max(min_x));
+                                                                    cube_velocity.x *= -0.5;
+                                                                }
+                                                                let top = available.top() + radius - base.y;
+                                                                if cube_offset.y >= top { cube_entered = true; }
+                                                                if cube_entered && cube_offset.y < top {
+                                                                    cube_offset.y = top.min(0.0);
+                                                                    cube_velocity.y = cube_velocity.y.abs() * 0.5;
+                                                                }
+                                                            }
+                                                            let sprite_rect = egui::Rect::from_center_size(base + cube_offset, egui::vec2(72.0, 72.0));
+                                                            let response = ui.interact(sprite_rect, ui.id().with("bouncing_cube"), egui::Sense::click_and_drag());
+                                                            if response.dragged() {
+                                                                cube_dragged = true;
+                                                                let delta = ctx.input(|i| i.pointer.delta());
+                                                                cube_offset += delta;
+                                                                cube_offset.y = cube_offset.y.clamp((available.top() + radius - base.y).min(0.0), 0.0);
+                                                                cube_offset.x = cube_offset.x.clamp((available.left() + radius - base.x).min(0.0), (available.right() - radius - base.x).max(0.0));
+                                                                cube_velocity = delta / dt.max(0.001);
+                                                            } else if cube_dragged {
+                                                                cube_dragged = false;
+                                                            }
+                                                            if response.clicked() {
+                                                                let hit = response.interact_pointer_pos().unwrap_or(sprite_rect.center()) - sprite_rect.center();
+                                                                cube_velocity.x += -hit.x * 10.0;
+                                                                cube_velocity.y = -650.0;
+                                                                cube_spin += hit.x * 0.16;
+                                                            }
+                                                            let center = base + cube_offset;
+                                                            let mut mesh = egui::Mesh::with_texture(cube_texture.id());
+                                                            let (sin, cos) = cube_angle.sin_cos();
+                                                            for (x, y, u, v) in [(-36.0, -36.0, 0.0, 0.0), (36.0, -36.0, 1.0, 0.0), (36.0, 36.0, 1.0, 1.0), (-36.0, 36.0, 0.0, 1.0)] {
+                                                                mesh.vertices.push(egui::epaint::Vertex { pos: center + egui::vec2(x * cos - y * sin, x * sin + y * cos), uv: egui::pos2(u, v), color: egui::Color32::WHITE });
+                                                            }
+                                                            mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
+                                                            ui.painter().with_clip_rect(available).add(egui::Shape::mesh(mesh));
+                                                            if cube_dragged || cube_offset.y < 0.0 || cube_velocity != egui::Vec2::ZERO || cube_spin.abs() > 0.01 {
+                                                                ctx.request_repaint();
+                                                            }
+                                                            ui.add_space(32.0);
 
                                                             ui.heading("Tangible");
                                                             ui.add_space(4.0);
