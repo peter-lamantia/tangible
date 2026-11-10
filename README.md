@@ -1,8 +1,10 @@
+![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue)
+
 # Tangible
 
 A simple, cross-platform STL, OBJ, and 3MF file viewer written in Rust.
 
-![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue)
+![Tangible UI](/assets/tangible-ui.png)
 
 ## Features
 
