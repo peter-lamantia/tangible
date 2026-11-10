@@ -1219,6 +1219,31 @@ fn main() {
                                 });
 
                             if file_info.is_some() {
+                                egui::Area::new(egui::Id::new("orientation_axes"))
+                                    .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-22.0, -bottom_panel.response.rect.height() - 65.0))
+                                    .interactable(false)
+                                    .show(ctx, |ui| {
+                                        let (rect, _) = ui.allocate_exact_size(egui::vec2(90.0, 90.0), egui::Sense::hover());
+                                        let center = rect.center();
+                                        let view = camera.view_matrix();
+                                        let mut axes = [
+                                            ("X", glam::Vec3::X, egui::Color32::from_rgb(235, 85, 85)),
+                                            ("Y", glam::Vec3::Y, egui::Color32::from_rgb(80, 190, 110)),
+                                            ("Z", glam::Vec3::Z, egui::Color32::from_rgb(85, 145, 245)),
+                                        ].map(|(label, axis, color)| (label, view.transform_vector3(axis), color));
+                                        axes.sort_by(|a, b| a.1.z.total_cmp(&b.1.z));
+                                        let painter = ui.painter();
+                                        for (label, axis, color) in axes {
+                                            let end = center + egui::vec2(axis.x, -axis.y) * 30.0;
+                                            painter.line_segment([center, end], egui::Stroke::new(2.5, color));
+                                            painter.circle_filled(end, 9.0, color);
+                                            painter.text(end, egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(11.0), egui::Color32::WHITE);
+                                        }
+                                        painter.circle_filled(center, 3.0, ui.visuals().text_color());
+                                    });
+                            }
+
+                            if file_info.is_some() {
                                 egui::Area::new(egui::Id::new("floating_reset_view"))
                                     .order(egui::Order::Foreground)
                                     .anchor(
