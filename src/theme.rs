@@ -125,7 +125,7 @@ fn radix_dark_visuals() -> egui::Visuals {
 
     v.panel_fill = bg_panel;
     v.window_fill = bg_panel;
-    v.window_stroke = egui::Stroke::new(1.0, border);
+    v.window_stroke = egui::Stroke::new(1.0_f32, border);
     v.window_shadow = egui::epaint::Shadow {
         offset: egui::vec2(0.0, 4.0),
         blur: 16.0,
@@ -134,28 +134,28 @@ fn radix_dark_visuals() -> egui::Visuals {
     };
 
     v.widgets.noninteractive.bg_fill = egui::Color32::TRANSPARENT;
-    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border);
-    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, text_muted);
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, border);
+    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, text_muted);
 
     v.widgets.inactive.bg_fill = bg_widget;
-    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border);
-    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text_primary);
+    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, border);
+    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, text_primary);
 
     v.widgets.hovered.bg_fill = bg_hover;
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, border_hover);
-    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, border_hover);
+    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
 
     v.widgets.active.bg_fill = bg_active;
-    v.widgets.active.bg_stroke = egui::Stroke::new(1.0, border_hover);
-    v.widgets.active.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+    v.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, border_hover);
+    v.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
 
     v.widgets.open.bg_fill = bg_active;
-    v.widgets.open.bg_stroke = egui::Stroke::new(1.0, border_hover);
-    v.widgets.open.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+    v.widgets.open.bg_stroke = egui::Stroke::new(1.0_f32, border_hover);
+    v.widgets.open.fg_stroke = egui::Stroke::new(1.0_f32, egui::Color32::WHITE);
 
     // Subtle accent color (Indigo/Blue 9)
     v.selection.bg_fill = egui::Color32::from_rgb(59, 130, 246);
-    v.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(147, 197, 253));
+    v.selection.stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(147, 197, 253));
 
     v.extreme_bg_color = egui::Color32::from_rgb(12, 13, 16);
     v
@@ -177,7 +177,7 @@ fn radix_light_visuals() -> egui::Visuals {
 
     v.panel_fill = bg_panel;
     v.window_fill = bg_panel;
-    v.window_stroke = egui::Stroke::new(1.0, border);
+    v.window_stroke = egui::Stroke::new(1.0_f32, border);
     v.window_shadow = egui::epaint::Shadow {
         offset: egui::vec2(0.0, 4.0),
         blur: 14.0,
@@ -186,28 +186,28 @@ fn radix_light_visuals() -> egui::Visuals {
     };
 
     v.widgets.noninteractive.bg_fill = egui::Color32::TRANSPARENT;
-    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, border);
-    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, text_muted);
+    v.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, border);
+    v.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0_f32, text_muted);
 
     v.widgets.inactive.bg_fill = bg_widget;
-    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0, border);
-    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, text_primary);
+    v.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, border);
+    v.widgets.inactive.fg_stroke = egui::Stroke::new(1.0_f32, text_primary);
 
     v.widgets.hovered.bg_fill = bg_hover;
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, border_hover);
-    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, text_primary);
+    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0_f32, border_hover);
+    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.0_f32, text_primary);
 
     v.widgets.active.bg_fill = bg_active;
-    v.widgets.active.bg_stroke = egui::Stroke::new(1.0, border_hover);
-    v.widgets.active.fg_stroke = egui::Stroke::new(1.0, text_primary);
+    v.widgets.active.bg_stroke = egui::Stroke::new(1.0_f32, border_hover);
+    v.widgets.active.fg_stroke = egui::Stroke::new(1.0_f32, text_primary);
 
     v.widgets.open.bg_fill = bg_active;
-    v.widgets.open.bg_stroke = egui::Stroke::new(1.0, border_hover);
-    v.widgets.open.fg_stroke = egui::Stroke::new(1.0, text_primary);
+    v.widgets.open.bg_stroke = egui::Stroke::new(1.0_f32, border_hover);
+    v.widgets.open.fg_stroke = egui::Stroke::new(1.0_f32, text_primary);
 
     // Subtle accent color (Indigo/Blue)
     v.selection.bg_fill = egui::Color32::from_rgb(37, 99, 235);
-    v.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(96, 165, 250));
+    v.selection.stroke = egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(96, 165, 250));
 
     v.extreme_bg_color = egui::Color32::from_rgb(255, 255, 255);
     v
@@ -229,7 +229,7 @@ pub enum Icon {
 }
 
 pub fn draw_icon(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: egui::Color32) {
-    let stroke = egui::Stroke::new(1.3, color);
+    let stroke = egui::Stroke::new(1.3_f32, color);
     let c = rect.center();
     let s = rect.width().min(rect.height()) * 0.5;
 
@@ -475,7 +475,7 @@ pub fn radix_badge(ui: &mut egui::Ui, icon: Option<Icon>, text: &str) {
             rect,
             egui::Rounding::same(12.0), // pill badge
             bg_color,
-            egui::Stroke::new(1.0, border_color),
+            egui::Stroke::new(1.0_f32, border_color),
         );
 
         let mut start_x = rect.min.x + padding.x;
@@ -571,7 +571,7 @@ pub fn theme_segmented_control(ui: &mut egui::Ui, current: &mut ThemePreference)
             container_rect,
             egui::Rounding::same(6.0),
             container_bg,
-            egui::Stroke::new(1.0, border_color),
+            egui::Stroke::new(1.0_f32, border_color),
         );
 
         // Always render items left-to-right within the container
@@ -602,11 +602,11 @@ pub fn theme_segmented_control(ui: &mut egui::Ui, current: &mut ThemePreference)
                 };
                 let active_stroke = if is_dark {
                     egui::Stroke::new(
-                        1.0,
+                        1.0_f32,
                         egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
                     )
                 } else {
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 25))
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 25))
                 };
                 ui.painter()
                     .rect(item_rect, rounding, active_bg, active_stroke);

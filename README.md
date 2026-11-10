@@ -47,9 +47,12 @@ cargo build --release
 
 ## Releases
 
-Each push to `main` publishes a build for Linux x86-64, macOS Apple
-silicon, and Windows x86-64 on the [Releases page](https://github.com/peter-lamantia/tangible/releases).
+Each push to `main` publishes builds for Linux and Windows on x86-64 and ARM64,
+and macOS on Intel and Apple silicon, on the [Releases page](https://github.com/peter-lamantia/tangible/releases).
 Download the ZIP for your platform and its SHA-256 checksum, then extract it.
+Choose `x86_64` for Intel or AMD processors and `arm64` for ARM processors,
+including Apple silicon. These additional architectures are built and tested in
+CI; GPU compatibility still depends on the device and its drivers.
 
 - **Windows:** Run `tangible.exe` from the extracted folder.
 - **macOS:** Move `Tangible.app` to Applications and open it. The app is not

@@ -165,7 +165,7 @@ mod tests {
             let mesh = parse_obj(&format!("{points}{face}")).unwrap();
             assert_eq!(mesh.vertices.len(), 18);
             let mut area = 0.0;
-            for triangle in mesh.vertices.chunks_exact(3) {
+            for triangle in mesh.vertices.as_chunks::<3>().0 {
                 let [a, b, c] = [0, 1, 2].map(|i| Vec3::from(triangle[i].position));
                 let signed = (b - a).cross(c - a).z * 0.5;
                 assert!(signed * sign > 0.0);

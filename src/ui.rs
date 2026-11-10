@@ -118,7 +118,7 @@ pub(crate) fn orientation_axes(
                     }
                 }
                 let painter = ui.painter();
-                painter.line_segment([center, end], egui::Stroke::new(2.5, color));
+                painter.line_segment([center, end], egui::Stroke::new(2.5_f32, color));
                 painter.circle_filled(end, 9.0, color);
                 painter.text(
                     end,
@@ -145,7 +145,7 @@ pub(crate) fn reset_view_button(ctx: &egui::Context, bottom_height: f32) -> bool
                 egui::RichText::new("↺  Reset view").color(egui::Color32::from_rgb(35, 43, 54)),
             )
             .fill(egui::Color32::from_rgba_unmultiplied(248, 250, 252, 225))
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(180)))
+            .stroke(egui::Stroke::new(1.0_f32, egui::Color32::from_gray(180)))
             .rounding(egui::Rounding::same(6.0));
             ui.add(button)
                 .on_hover_text("Reset camera to center of model")

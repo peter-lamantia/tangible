@@ -528,7 +528,7 @@ fn main() {
                                                             let floor = slot.bottom() + 16.0;
                                                             let radius = 51.0_f32;
                                                             let base = egui::pos2(slot.center().x, floor - radius);
-                                                            ui.painter().line_segment([egui::pos2(available.left(), floor), egui::pos2(available.right(), floor)], egui::Stroke::new(1.0, if is_dark { egui::Color32::from_gray(80) } else { egui::Color32::from_gray(190) }));
+                                                            ui.painter().line_segment([egui::pos2(available.left(), floor), egui::pos2(available.right(), floor)], egui::Stroke::new(1.0_f32, if is_dark { egui::Color32::from_gray(80) } else { egui::Color32::from_gray(190) }));
                                                             let dt = cube_last_time.elapsed().as_secs_f32().min(0.033);
                                                             cube_last_time = std::time::Instant::now();
                                                             if !cube_dragged {
@@ -710,10 +710,8 @@ fn main() {
                 }
             }
 
-            Event::AboutToWait => {
-                if egui_ctx.has_requested_repaint() {
-                    window.request_redraw();
-                }
+            Event::AboutToWait if egui_ctx.has_requested_repaint() => {
+                window.request_redraw();
             }
 
             _ => {}

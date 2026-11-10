@@ -18,7 +18,7 @@ pub(crate) fn plate_preview(
     let mvp = camera.projection_matrix() * camera.view_matrix();
     let light = glam::Vec3::new(0.5, 1.0, 0.8).normalize();
     let eye = camera.eye();
-    for triangle in mesh.vertices.chunks_exact(3) {
+    for triangle in mesh.vertices.as_chunks::<3>().0 {
         if !current() {
             return None;
         }
@@ -118,7 +118,7 @@ pub(crate) fn plate_preview(
     for (pixel, samples) in image
         .pixels
         .iter_mut()
-        .zip(colors.chunks_exact(SAMPLES.len()))
+        .zip(colors.as_chunks::<{ SAMPLES.len() }>().0.iter())
     {
         let mut sum = [0u32; 4];
         for sample in samples {

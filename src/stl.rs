@@ -24,7 +24,7 @@ fn parse_binary_stl(data: &[u8]) -> MeshResult<Mesh> {
         return Err("Binary STL size mismatch".into());
     }
     let mut triangles = Vec::with_capacity(count);
-    for record in data[84..].chunks_exact(50) {
+    for record in data[84..].as_chunks::<50>().0 {
         if triangles.len() % 1024 == 0 {
             crate::mesh::check_cancelled()?;
         }

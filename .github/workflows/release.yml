@@ -17,11 +17,20 @@ jobs:
           - os: ubuntu-latest
             artifact: tangible-linux-x86_64
             binary: tangible
+          - os: ubuntu-24.04-arm
+            artifact: tangible-linux-arm64
+            binary: tangible
           - os: macos-latest
             artifact: tangible-macos-arm64
             binary: tangible
+          - os: macos-15-intel
+            artifact: tangible-macos-x86_64
+            binary: tangible
           - os: windows-latest
             artifact: tangible-windows-x86_64
+            binary: tangible.exe
+          - os: windows-11-arm
+            artifact: tangible-windows-arm64
             binary: tangible.exe
     runs-on: ${{ matrix.os }}
     steps:
