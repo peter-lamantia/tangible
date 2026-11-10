@@ -88,7 +88,7 @@ impl Mesh {
         mesh.bounds_min = Vec3::splat(f32::INFINITY);
         mesh.bounds_max = Vec3::splat(f32::NEG_INFINITY);
         for triangle in triangles {
-            if mesh.vertices.len() % 3072 == 0 {
+            if mesh.vertices.len().is_multiple_of(3072) {
                 check_cancelled()?;
             }
             if mesh.vertices.len() / 3 >= MAX_TRIANGLES {

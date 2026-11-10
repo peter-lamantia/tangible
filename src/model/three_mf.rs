@@ -262,7 +262,7 @@ fn collect_object(
         .ok_or_else(|| format!("3MF object {id} missing in {path}"))?;
     budget.active.push(key);
     for face in &object.faces {
-        if triangles.len() % 1024 == 0 {
+        if triangles.len().is_multiple_of(1024) {
             crate::mesh::check_cancelled()?;
         }
         let mut triangle = [[0.0; 3]; 3];

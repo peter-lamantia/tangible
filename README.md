@@ -17,30 +17,6 @@ A simple, cross-platform STL, OBJ, and 3MF file viewer written in Rust.
 - **Responsive loading** — background parsing and progressive plate previews; the most recently opened file takes priority
 - **Model details** — displays filename, triangle/vertex counts, and bounding box dimensions
 
-## Format support
-
-OBJ faces may be convex or concave simple polygons; faces with more than 4,096
-vertices are rejected. STL facets must contain exactly three finite vertices;
-normals are derived from geometry for consistent shading.
-
-3MF model units (micron, millimeter, centimeter, inch, foot, and meter) are
-converted to millimeters, including transforms and plate dimensions. The model
-start part is read from package relationships. For older archives without those
-relationships, the conventional `3D/3dmodel.model` path is accepted. Relative
-component paths are resolved within the archive. STL and OBJ dimensions remain
-in the file's unspecified coordinate units.
-
-To keep unusually large or malformed files from exhausting resources, input files
-and total decompressed 3MF contents are limited to 512 MiB, each XML part to
-256 MiB, and 3MF archives to 4,096 entries and 4,096 plates. Geometry is limited to 5 million
-triangles per model and across plate meshes; component expansion is limited to
-64 levels and 100,000 visits per model or plate collection. Invalid geometry and
-unsupported sizes produce a loading error.
-
-The projection control switches between perspective and orthographic views. Click an
-axis marker to look along that axis, and press **F** to frame the current model.
-The **Edges** control overlays triangle edges on the shaded model.
-
 ## Usage
 
 You can launch the viewer with or without a file:
@@ -71,10 +47,20 @@ cargo build --release
 
 ## Releases
 
-Each push to `main` builds native applications for Linux x86-64, macOS Apple
-silicon, and Windows x86-64 and publishes them on the repository's Releases
-page. Download the executable for your platform and its SHA-256 checksum from the release.
-On Linux or macOS, make the downloaded file executable with `chmod +x <filename>`.
+Each push to `main` publishes a build for Linux x86-64, macOS Apple
+silicon, and Windows x86-64 on the [Releases page](https://github.com/peter-lamantia/tangible/releases).
+Download the ZIP for your platform and its SHA-256 checksum, then extract it.
+
+- **Windows:** Run `tangible.exe` from the extracted folder.
+- **macOS:** Move `Tangible.app` to Applications and open it. The app is not
+  signed or notarized, so macOS may require you to approve it in Privacy & Security.
+- **Linux:** Run `./tangible` from the extracted folder. For an application menu
+  entry, copy `tangible` to `~/.local/bin/`, `tangible.svg` to
+  `~/.local/share/icons/hicolor/scalable/apps/`, and `tangible.desktop` to
+  `~/.local/share/applications/`; ensure `~/.local/bin` is on your PATH.
+
+Linux source builds also require the Wayland, xkbcommon, and GTK 3 development
+packages (on Debian/Ubuntu: `libwayland-dev libxkbcommon-dev libgtk-3-dev`).
 
 ## Source layout
 

@@ -41,24 +41,8 @@ fn main() {
         None
     };
 
-    let mut event_loop_builder = EventLoopBuilder::<AppEvent>::with_user_event();
-    // winit 0.29 does not deliver file-drop events on Wayland. Prefer X11
-    // (including XWayland) when available, unless the user chose a backend.
-    #[cfg(target_os = "linux")]
-    if std::env::var_os("WINIT_UNIX_BACKEND").is_none() && std::env::var_os("DISPLAY").is_some() {
-        use winit::platform::x11::EventLoopBuilderExtX11;
-        event_loop_builder.with_x11();
-    }
-    let event_loop: EventLoop<AppEvent> = event_loop_builder.build().unwrap();
+    let (event_loop, window) = create_window();
     let proxy = event_loop.create_proxy();
-
-    let window = Arc::new(
-        WindowBuilder::new()
-            .with_title("Tangible")
-            .with_inner_size(LogicalSize::new(1280.0, 720.0))
-            .build(&event_loop)
-            .expect("Failed to create window"),
-    );
 
     let egui_ctx = egui::Context::default();
     theme::setup_fonts(&egui_ctx);
@@ -497,10 +481,10 @@ fn main() {
                                 ui::orientation_axes(ctx, &mut camera, bottom_panel.response.rect.height());
                             }
 
-                            if file_info.is_some() {
-                                if ui::reset_view_button(ctx, bottom_panel.response.rect.height()) {
-                                    should_reset_camera = true;
-                                }
+                            if file_info.is_some()
+                                && ui::reset_view_button(ctx, bottom_panel.response.rect.height())
+                            {
+                                should_reset_camera = true;
                             }
 
                             // ── Welcome Screen (when no model loaded) ────────────
@@ -735,4 +719,26 @@ fn main() {
             _ => {}
         })
         .unwrap();
+}
+
+fn create_window() -> (EventLoop<AppEvent>, Arc<winit::window::Window>) {
+    let mut event_loop_builder = EventLoopBuilder::<AppEvent>::with_user_event();
+    // winit 0.29 does not deliver file-drop events on Wayland. Prefer X11
+    // (including XWayland) when available, unless the user chose a backend.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WINIT_UNIX_BACKEND").is_none() && std::env::var_os("DISPLAY").is_some() {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        event_loop_builder.with_x11();
+    }
+    let event_loop: EventLoop<AppEvent> = event_loop_builder.build().unwrap();
+
+    let window = Arc::new(
+        WindowBuilder::new()
+            .with_title("Tangible")
+            .with_inner_size(LogicalSize::new(1280.0, 720.0))
+            .build(&event_loop)
+            .expect("Failed to create window"),
+    );
+
+    (event_loop, window)
 }
