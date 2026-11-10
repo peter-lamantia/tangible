@@ -1,5 +1,6 @@
 mod camera;
 mod stl;
+mod theme;
 
 use std::sync::Arc;
 use winit::dpi::LogicalSize;
@@ -307,6 +308,7 @@ impl GpuState {
         egui_shapes: Vec<egui::epaint::ClippedShape>,
         textures_delta: &egui::TexturesDelta,
         pixels_per_point: f32,
+        is_dark: bool,
     ) {
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
@@ -324,11 +326,23 @@ impl GpuState {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
-        // Build 3D uniforms
+        // Build 3D uniforms with theme-adaptive ambient and light colors
         let model = glam::Mat4::IDENTITY;
         let view_mat = cam.view_matrix();
         let proj = cam.projection_matrix();
         let mvp = proj * view_mat * model;
+
+        let ambient = if is_dark {
+            [0.18, 0.18, 0.22]
+        } else {
+            [0.34, 0.35, 0.38]
+        };
+
+        let light_color = if is_dark {
+            [1.0, 0.98, 0.95]
+        } else {
+            [0.94, 0.95, 0.98]
+        };
 
         let uniforms = Uniforms {
             mvp: mvp.to_cols_array_2d(),
@@ -336,9 +350,9 @@ impl GpuState {
             normal_matrix: model.inverse().transpose().to_cols_array_2d(),
             light_dir: glam::Vec3::new(0.5, 1.0, 0.8).normalize().to_array(),
             _pad1: 0.0,
-            light_color: [1.0, 0.98, 0.95],
+            light_color,
             _pad2: 0.0,
-            ambient: [0.15, 0.15, 0.18],
+            ambient,
             _pad3: 0.0,
             eye_pos: cam.eye().to_array(),
             _pad4: 0.0,
@@ -380,12 +394,7 @@ impl GpuState {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.08,
-                            g: 0.08,
-                            b: 0.10,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(theme::clear_color(is_dark)),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -512,13 +521,21 @@ fn main() {
 
     let window = Arc::new(
         WindowBuilder::new()
-            .with_title("STL Viewer")
+            .with_title("Tangible")
             .with_inner_size(LogicalSize::new(1280.0, 720.0))
             .build(&event_loop)
             .expect("Failed to create window"),
     );
 
     let egui_ctx = egui::Context::default();
+    theme::setup_fonts(&egui_ctx);
+
+    let system_theme = window.theme().unwrap_or(winit::window::Theme::Dark);
+    let mut system_is_dark = matches!(system_theme, winit::window::Theme::Dark);
+    let mut theme_pref = theme::ThemePreference::System;
+    let mut is_dark = theme_pref.is_dark(system_is_dark);
+    theme::apply_theme(&egui_ctx, is_dark);
+
     let mut egui_state = egui_winit::State::new(
         egui_ctx.clone(),
         egui::ViewportId::ROOT,
@@ -552,6 +569,7 @@ fn main() {
     let mut should_open_file = false;
     let mut should_reset_camera = false;
     let mut should_clear_error = false;
+    let mut should_update_theme = false;
 
     // ── Run event loop ───────────────────────────────────────────────────
     event_loop
@@ -576,7 +594,7 @@ fn main() {
 
                     camera.frame_target(center, extent);
                     gpu.load_mesh(&mesh);
-                    window.set_title(&format!("STL Viewer — {file_name}"));
+                    window.set_title(&format!("Tangible — {file_name}"));
 
                     file_info = Some(FileInfo {
                         name: file_name,
@@ -620,6 +638,16 @@ fn main() {
 
                 match event {
                     WindowEvent::CloseRequested => elwt.exit(),
+
+                    WindowEvent::ThemeChanged(theme) => {
+                        system_is_dark = matches!(theme, winit::window::Theme::Dark);
+                        let new_is_dark = theme_pref.is_dark(system_is_dark);
+                        if new_is_dark != is_dark {
+                            is_dark = new_is_dark;
+                            theme::apply_theme(&egui_ctx, is_dark);
+                        }
+                        window.request_redraw();
+                    }
 
                     WindowEvent::Resized(size) => {
                         gpu.resize(size.width, size.height);
@@ -702,76 +730,102 @@ fn main() {
                     WindowEvent::RedrawRequested => {
                         let raw_input = egui_state.take_egui_input(&window);
                         let full_output = egui_ctx.run(raw_input, |ctx| {
-                            // ── Top Panel ────────────────────────────────────────
+                            // ── Top Bar ──────────────────────────────────────────
                             egui::TopBottomPanel::top("top_panel")
                                 .frame(
-                                    egui::Frame::side_top_panel(&ctx.style())
-                                        .inner_margin(egui::Margin::symmetric(10.0, 6.0)),
+                                    egui::Frame::none()
+                                        .fill(ctx.style().visuals.panel_fill)
+                                        .inner_margin(egui::Margin::symmetric(12.0, 7.0)),
                                 )
                                 .show(ctx, |ui| {
                                     ui.horizontal(|ui| {
-                                        if ui
-                                            .button("📂 Open STL...")
-                                            .on_hover_text("Open an STL file from disk (Ctrl+O / O)")
-                                            .clicked()
+                                        if theme::radix_button(
+                                            ui,
+                                            Some(theme::Icon::Folder),
+                                            "Open STL",
+                                        )
+                                        .on_hover_text("Open an STL file from disk (Ctrl+O / O)")
+                                        .clicked()
                                         {
                                             should_open_file = true;
                                         }
 
-                                        if ui
-                                            .button("🔄 Reset View")
+                                        if file_info.is_some() {
+                                            if theme::radix_button(
+                                                ui,
+                                                Some(theme::Icon::Reset),
+                                                "Reset View",
+                                            )
                                             .on_hover_text("Reset camera to center of model")
                                             .clicked()
-                                        {
-                                            should_reset_camera = true;
+                                            {
+                                                should_reset_camera = true;
+                                            }
                                         }
 
-                                        ui.separator();
-
                                         if let Some(loading) = &loading_name {
+                                            ui.add_space(6.0);
                                             ui.spinner();
                                             ui.label(
                                                 egui::RichText::new(format!("Loading {loading}..."))
-                                                    .color(egui::Color32::from_rgb(180, 215, 255)),
+                                                    .color(if is_dark {
+                                                        egui::Color32::from_rgb(147, 197, 253)
+                                                    } else {
+                                                        egui::Color32::from_rgb(37, 99, 235)
+                                                    }),
                                             );
                                         } else if let Some(info) = &file_info {
-                                            ui.label(
-                                                egui::RichText::new(&info.name)
-                                                    .strong()
-                                                    .color(egui::Color32::from_rgb(220, 230, 245)),
-                                            )
-                                            .on_hover_text(format!(
-                                                "Path: {}\nVertices: {}",
-                                                info.path.display(),
-                                                format_number(info.num_vertices)
-                                            ));
-                                            ui.separator();
-                                            ui.label(format!(
-                                                "📐 {} triangles",
-                                                format_number(info.num_triangles)
-                                            ));
-                                            ui.separator();
-                                            ui.label(format!(
-                                                "Dimensions: {:.1} × {:.1} × {:.1}",
-                                                info.dimensions.x,
-                                                info.dimensions.y,
-                                                info.dimensions.z
-                                            ));
-                                        } else {
-                                            ui.label(
-                                                egui::RichText::new("No model loaded")
-                                                    .italics()
-                                                    .weak(),
+                                            ui.add_space(6.0);
+                                            theme::radix_badge(
+                                                ui,
+                                                Some(theme::Icon::Cube),
+                                                &format!("{} triangles", format_number(info.num_triangles)),
+                                            );
+                                            theme::radix_badge(
+                                                ui,
+                                                Some(theme::Icon::Ruler),
+                                                &format!(
+                                                    "{:.1} × {:.1} × {:.1}",
+                                                    info.dimensions.x, info.dimensions.y, info.dimensions.z
+                                                ),
                                             );
                                         }
+
+                                        // Right-aligned: Theme selector & file name
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if theme::theme_segmented_control(
+                                                    ui,
+                                                    &mut theme_pref,
+                                                ) {
+                                                    should_update_theme = true;
+                                                }
+
+                                                if let Some(info) = &file_info {
+                                                    ui.add_space(10.0);
+                                                    ui.label(
+                                                        egui::RichText::new(&info.name)
+                                                            .strong()
+                                                            .color(ui.visuals().widgets.active.text_color()),
+                                                    )
+                                                    .on_hover_text(format!(
+                                                        "Path: {}\nVertices: {}",
+                                                        info.path.display(),
+                                                        format_number(info.num_vertices)
+                                                    ));
+                                                }
+                                            },
+                                        );
                                     });
                                 });
 
-                            // ── Bottom Controls Bar ──────────────────────────────
+                            // ── Bottom Status Bar ────────────────────────────────
                             egui::TopBottomPanel::bottom("bottom_panel")
                                 .frame(
-                                    egui::Frame::side_top_panel(&ctx.style())
-                                        .inner_margin(egui::Margin::symmetric(10.0, 4.0)),
+                                    egui::Frame::none()
+                                        .fill(ctx.style().visuals.panel_fill)
+                                        .inner_margin(egui::Margin::symmetric(12.0, 5.0)),
                                 )
                                 .show(ctx, |ui| {
                                     ui.horizontal(|ui| {
@@ -780,27 +834,33 @@ fn main() {
                                                 "Left Drag: Orbit  •  Right Drag: Pan  •  Scroll: Zoom",
                                             )
                                             .small()
-                                            .weak(),
+                                            .color(ui.visuals().widgets.noninteractive.text_color()),
                                         );
 
-                                        if loading_name.is_some() {
-                                            ui.separator();
-                                            ui.label(
-                                                egui::RichText::new("Parsing mesh in background...")
-                                                    .small()
-                                                    .color(egui::Color32::from_rgb(170, 205, 255)),
-                                            );
-                                        }
-
                                         if let Some(err) = &error_message {
-                                            ui.separator();
-                                            ui.colored_label(
-                                                egui::Color32::from_rgb(255, 100, 100),
-                                                format!("⚠ {err}"),
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    if theme::radix_button(
+                                                        ui,
+                                                        Some(theme::Icon::Close),
+                                                        "",
+                                                    )
+                                                    .on_hover_text("Dismiss error")
+                                                    .clicked()
+                                                    {
+                                                        should_clear_error = true;
+                                                    }
+                                                    ui.colored_label(
+                                                        if is_dark {
+                                                            egui::Color32::from_rgb(248, 113, 113)
+                                                        } else {
+                                                            egui::Color32::from_rgb(220, 38, 38)
+                                                        },
+                                                        format!("⚠ {err}"),
+                                                    );
+                                                },
                                             );
-                                            if ui.small_button("✖").clicked() {
-                                                should_clear_error = true;
-                                            }
                                         }
                                     });
                                 });
@@ -810,72 +870,140 @@ fn main() {
                                 egui::CentralPanel::default()
                                     .frame(egui::Frame::none())
                                     .show(ctx, |ui| {
-                                        ui.centered_and_justified(|ui| {
-                                            egui::Frame::window(ui.style())
-                                                .inner_margin(28.0)
-                                                .show(ui, |ui| {
-                                                    ui.set_max_width(420.0);
-                                                    ui.vertical_centered(|ui| {
-                                                        ui.heading("STL 3D Viewer");
-                                                        ui.add_space(8.0);
+                                        let available = ui.available_rect_before_wrap();
+                                        let card_w = 380.0_f32;
+                                        let card_inner = 32.0_f32;
 
-                                                        if let Some(loading) = &loading_name {
+                                        let card_bg = if is_dark {
+                                            egui::Color32::from_rgba_unmultiplied(20, 22, 27, 240)
+                                        } else {
+                                            egui::Color32::from_rgba_unmultiplied(255, 255, 255, 245)
+                                        };
+                                        let card_stroke = egui::Stroke::new(
+                                            1.0,
+                                            if is_dark {
+                                                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 24)
+                                            } else {
+                                                egui::Color32::from_rgba_unmultiplied(0, 0, 0, 22)
+                                            },
+                                        );
+
+                                        // Measure card height by running a dry layout pass
+                                        let card_height = {
+                                            let icon_h = 36.0_f32;
+                                            let heading_h = 24.0_f32;
+                                            let subtitle_h = 15.0_f32;
+                                            let btn_h = 28.0_f32;
+                                            let hint_h = 15.0_f32;
+                                            let badge_h = 23.0_f32;
+                                            let spacing = 8.0 + 4.0 + 20.0 + 14.0 + 8.0;
+                                            icon_h + heading_h + subtitle_h + btn_h + hint_h + badge_h + spacing + card_inner * 2.0
+                                        };
+
+                                        // Center the card in the available area
+                                        let card_x = available.center().x - card_w * 0.5 - card_inner;
+                                        let card_y = (available.center().y - card_height * 0.5).max(available.top() + 16.0);
+
+                                        ui.allocate_ui_at_rect(
+                                            egui::Rect::from_min_size(
+                                                egui::pos2(card_x, card_y),
+                                                egui::vec2(card_w + card_inner * 2.0, card_height),
+                                            ),
+                                            |ui| {
+                                                egui::Frame::none()
+                                                    .fill(card_bg)
+                                                    .stroke(card_stroke)
+                                                    .rounding(egui::Rounding::same(12.0))
+                                                    .shadow(ui.visuals().window_shadow)
+                                                    .inner_margin(card_inner)
+                                                    .show(ui, |ui| {
+                                                        ui.set_min_width(card_w);
+                                                        ui.set_max_width(card_w);
+                                                        ui.vertical_centered(|ui| {
+                                                            let (icon_rect, _) = ui.allocate_exact_size(
+                                                                egui::vec2(36.0, 36.0),
+                                                                egui::Sense::hover(),
+                                                            );
+                                                            theme::draw_icon(
+                                                                ui.painter(),
+                                                                icon_rect,
+                                                                theme::Icon::Cube,
+                                                                if is_dark {
+                                                                    egui::Color32::from_rgb(147, 197, 253)
+                                                                } else {
+                                                                    egui::Color32::from_rgb(37, 99, 235)
+                                                                },
+                                                            );
                                                             ui.add_space(8.0);
-                                                            ui.spinner();
-                                                            ui.add_space(8.0);
-                                                            ui.label(format!("Loading {loading}..."));
-                                                            ui.label(
-                                                                egui::RichText::new(
-                                                                    "Parsing triangles in background...",
-                                                                )
-                                                                .weak(),
-                                                            );
-                                                        } else {
-                                                            ui.label(
-                                                                "Open a binary or ASCII STL file to view and inspect.",
-                                                            );
-                                                            ui.add_space(18.0);
 
-                                                            if ui
-                                                                .add_sized(
-                                                                    [220.0, 40.0],
-                                                                    egui::Button::new(
-                                                                        egui::RichText::new(
-                                                                            "📂  Open STL File",
-                                                                        )
-                                                                        .size(16.0),
-                                                                    ),
-                                                                )
-                                                                .on_hover_text("Open file dialog (Ctrl+O / O)")
-                                                                .clicked()
-                                                            {
-                                                                should_open_file = true;
-                                                            }
-
-                                                            ui.add_space(12.0);
-                                                            ui.label(
-                                                                egui::RichText::new(
-                                                                    "or drag & drop a .stl file here",
-                                                                )
-                                                                .weak(),
-                                                            );
+                                                            ui.heading("Tangible");
                                                             ui.add_space(4.0);
                                                             ui.label(
                                                                 egui::RichText::new(
-                                                                    "Keyboard shortcut: Ctrl+O / Cmd+O / O",
+                                                                    "Inspect and view binary or ASCII STL models",
                                                                 )
                                                                 .small()
-                                                                .weak(),
+                                                                .color(ui.visuals().widgets.noninteractive.text_color()),
                                                             );
-                                                        }
+                                                            ui.add_space(20.0);
+
+                                                            if let Some(loading) = &loading_name {
+                                                                ui.spinner();
+                                                                ui.add_space(8.0);
+                                                                ui.label(format!("Loading {loading}..."));
+                                                                ui.label(
+                                                                    egui::RichText::new(
+                                                                        "Parsing triangles in background...",
+                                                                    )
+                                                                    .small()
+                                                                    .weak(),
+                                                                );
+                                                            } else {
+                                                                if theme::radix_button(
+                                                                    ui,
+                                                                    Some(theme::Icon::Folder),
+                                                                    "Open STL File",
+                                                                )
+                                                                .on_hover_text("Open file dialog (Ctrl+O / O)")
+                                                                .clicked()
+                                                                {
+                                                                    should_open_file = true;
+                                                                }
+
+                                                                ui.add_space(14.0);
+                                                                ui.label(
+                                                                    egui::RichText::new(
+                                                                        "or drag & drop a .stl file anywhere",
+                                                                    )
+                                                                    .small()
+                                                                    .weak(),
+                                                                );
+                                                                ui.add_space(8.0);
+                                                                theme::radix_badge(
+                                                                    ui,
+                                                                    None,
+                                                                    "Shortcut: Ctrl+O / O",
+                                                                );
+                                                            }
+                                                        });
                                                     });
-                                                });
-                                        });
+                                            },
+                                        );
                                     });
                             }
                         });
 
                         egui_state.handle_platform_output(&window, full_output.platform_output);
+
+                        if should_update_theme {
+                            should_update_theme = false;
+                            let new_is_dark = theme_pref.is_dark(system_is_dark);
+                            if new_is_dark != is_dark {
+                                is_dark = new_is_dark;
+                                theme::apply_theme(&egui_ctx, is_dark);
+                            }
+                            window.request_redraw();
+                        }
 
                         gpu.render(
                             &camera,
@@ -883,6 +1011,7 @@ fn main() {
                             full_output.shapes,
                             &full_output.textures_delta,
                             full_output.pixels_per_point,
+                            is_dark,
                         );
 
                         if should_open_file {
