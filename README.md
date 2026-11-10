@@ -8,28 +8,11 @@ A simple, cross-platform STL, OBJ, and 3MF file viewer written in Rust.
 
 - **Cross-platform** — runs natively on Windows, macOS, and Linux
 - **GUI File Opening** — native file dialog (`rfd`), top bar button, and drag-and-drop
-- **Launch with or without files** — shows a welcome screen when launched directly
 - **GPU-accelerated** — uses `wgpu` (Vulkan / Metal / DX12)
 - **STL, OBJ & 3MF** — binary and ASCII STL, polygonal OBJ, and zipped 3MF models
-- **Orbit camera** — rotate, pan, and zoom with mouse
-- **Blinn-Phong lighting** — two-sided shading
-- **Antialiasing setting** — 4× MSAA enabled by default on supported GPUs
+- **Antialiasing** — 4× MSAA enabled by default on supported GPUs
 - **3MF plate selection** — shaded square previews for all plates and each individual plate, with a resizable and collapsible panel
 - **Model details** — displays filename, triangle/vertex counts, and bounding box dimensions
-
-## Controls
-
-| Input                  | Action                        |
-|------------------------|-------------------------------|
-| **📂 Open Model Button** | Open native file picker       |
-| **Drag & Drop**        | Drop `.stl`, `.obj`, or `.3mf` into window   |
-| `Ctrl + O` / `Cmd + O` | Open file picker dialog       |
-| `O` key                | Open file picker dialog       |
-| **🔄 Reset View**      | Re-center camera on model     |
-| Left mouse drag        | Orbit (rotate around model)   |
-| Right mouse drag       | Pan                           |
-| Middle mouse drag      | Pan                           |
-| Scroll wheel           | Zoom in / out                 |
 
 ## Usage
 
@@ -59,14 +42,8 @@ cargo build --release
 - **macOS**: Metal-capable GPU (any Mac from 2012+)
 - **Windows**: DX12 or Vulkan-capable GPU
 
-## Dependencies
+## Releases
 
-| Crate        | Purpose                                    |
-|--------------|--------------------------------------------|
-| `wgpu`       | Cross-platform GPU rendering               |
-| `winit`      | Cross-platform windowing and event handling|
-| `rfd`        | Native OS open file dialogs                |
-| `egui`       | Immediate-mode GUI overlay                 |
-| `glam`       | Linear algebra (vectors, matrices)         |
-| `bytemuck`   | Safe casting for GPU buffers               |
-| `pollster`   | Synchronous bridge for async wgpu setup    |
+Each push to `main` builds native applications for Linux x86-64, macOS Apple
+silicon, and Windows x86-64 and publishes them on the repository's Releases
+page. Download and extract the archive for your platform to run the application.
