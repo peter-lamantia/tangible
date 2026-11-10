@@ -29,20 +29,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev libwayland-dev libxkbcommon-dev libx11-dev libxrandr-dev libxi-dev libxcursor-dev libasound2-dev
+        run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev libgtk-3-dev
       - name: Build
         run: cargo build --release --locked
-      - name: Package
+      - name: Prepare executable and checksum
         shell: bash
         run: |
-          mkdir -p "${{ matrix.artifact }}"
-          cp "target/release/${{ matrix.binary }}" "${{ matrix.artifact }}/"
-          cp README.md "${{ matrix.artifact }}/"
-          python -m zipfile -c "${{ matrix.artifact }}.zip" "${{ matrix.artifact }}"
+          cp "target/release/${{ matrix.binary }}" "${{ matrix.artifact }}${{ matrix.os == 'windows-latest' && '.exe' || '' }}"
+          python -c "import hashlib,pathlib; p=pathlib.Path('${{ matrix.artifact }}${{ matrix.os == 'windows-latest' && '.exe' || '' }}'); pathlib.Path(str(p)+'.sha256').write_text(hashlib.sha256(p.read_bytes()).hexdigest()+'  '+p.name+'\n')"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.zip
+          path: |
+            ${{ matrix.artifact }}${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+            ${{ matrix.artifact }}${{ matrix.os == 'windows-latest' && '.exe' || '' }}.sha256
           if-no-files-found: error
 
   release:
@@ -64,7 +64,7 @@ jobs:
         run: |
           tag="main-${COMMIT}"
           if gh release view "$tag" >/dev/null 2>&1; then
-            gh release upload "$tag" artifacts/*.zip --clobber
+            gh release upload "$tag" artifacts/* --clobber
           else
-            gh release create "$tag" artifacts/*.zip --target "$COMMIT" --title "Main build ${COMMIT:0:7}" --generate-notes
+            gh release create "$tag" artifacts/* --target "$COMMIT" --title "Main build ${COMMIT:0:7}" --generate-notes
           fi

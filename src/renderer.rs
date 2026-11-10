@@ -15,7 +15,7 @@ struct Uniforms {
     ambient: [f32; 3],
     _pad3: f32,
     eye_pos: [f32; 3],
-    _pad4: f32,
+    edges: f32,
 }
 
 pub(crate) struct GpuState {
@@ -31,6 +31,7 @@ pub(crate) struct GpuState {
     msaa_view: Option<wgpu::TextureView>,
     pub(crate) sample_count: u32,
     pub(crate) msaa_supported: bool,
+    pub(crate) show_edges: bool,
     shader: wgpu::ShaderModule,
     bind_group_layout: wgpu::BindGroupLayout,
     egui_renderer: egui_wgpu::Renderer,
@@ -38,7 +39,7 @@ pub(crate) struct GpuState {
 }
 
 impl GpuState {
-    pub(crate) fn new(window: Arc<Window>, mesh: &mesh::Mesh) -> Self {
+    pub(crate) fn new(window: Arc<Window>, mesh: &mesh::Mesh) -> Result<Self, String> {
         let size = window.inner_size();
 
         // ── Instance + Surface + Adapter + Device ────────────────────────
@@ -47,14 +48,18 @@ impl GpuState {
             ..Default::default()
         });
 
-        let surface = instance.create_surface(window.clone()).unwrap();
+        let surface = instance
+            .create_surface(window.clone())
+            .map_err(|e| format!("Could not create graphics surface: {e}"))?;
 
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::default(),
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
         }))
-        .expect("No suitable GPU adapter found");
+        .ok_or(
+            "No suitable graphics adapter found. Check that your graphics drivers are installed.",
+        )?;
 
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
@@ -64,7 +69,7 @@ impl GpuState {
             },
             None,
         ))
-        .expect("Failed to create GPU device");
+        .map_err(|e| format!("Could not initialize graphics device: {e}"))?;
 
         // ── Surface config ───────────────────────────────────────────────
         let caps = surface.get_capabilities(&adapter);
@@ -73,7 +78,8 @@ impl GpuState {
             .iter()
             .find(|f| f.is_srgb())
             .copied()
-            .unwrap_or(caps.formats[0]);
+            .or_else(|| caps.formats.first().copied())
+            .ok_or("No supported display format found")?;
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -81,7 +87,10 @@ impl GpuState {
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: caps.alpha_modes[0],
+            alpha_mode: *caps
+                .alpha_modes
+                .first()
+                .ok_or("No supported display alpha mode found")?,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -144,7 +153,7 @@ impl GpuState {
 
         let egui_renderer = egui_wgpu::Renderer::new(&device, config.format, None, 1);
 
-        Self {
+        Ok(Self {
             surface,
             device,
             queue,
@@ -157,11 +166,12 @@ impl GpuState {
             msaa_view,
             sample_count,
             msaa_supported,
+            show_edges: false,
             shader,
             bind_group_layout,
             egui_renderer,
             num_vertices: mesh.vertices.len() as u32,
-        }
+        })
     }
 
     fn create_pipeline(
@@ -386,7 +396,7 @@ impl GpuState {
             ambient,
             _pad3: 0.0,
             eye_pos: cam.eye().to_array(),
-            _pad4: 0.0,
+            edges: if self.show_edges { 1.0 } else { 0.0 },
         };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));

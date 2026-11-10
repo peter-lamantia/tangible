@@ -86,6 +86,7 @@ fn parse_model(xml: &str) -> Result<Model> {
     };
     let mut current: Option<(String, Object)> = None;
     loop {
+        crate::mesh::check_cancelled()?;
         match reader.read_event()? {
             Event::Start(e) | Event::Empty(e) => match e.local_name().as_ref() {
                 b"model" => {
@@ -261,6 +262,9 @@ fn collect_object(
         .ok_or_else(|| format!("3MF object {id} missing in {path}"))?;
     budget.active.push(key);
     for face in &object.faces {
+        if triangles.len() % 1024 == 0 {
+            crate::mesh::check_cancelled()?;
+        }
         let mut triangle = [[0.0; 3]; 3];
         for (i, &index) in face.iter().enumerate() {
             triangle[i] = apply_transform(
@@ -277,6 +281,7 @@ fn collect_object(
         triangles.push(triangle);
     }
     for component in &object.components {
+        crate::mesh::check_cancelled()?;
         let (child_path, local_transform) = reference_transform(models, path, component)?;
         let child_transform = combine(transform, &local_transform);
         collect_object(
@@ -318,8 +323,18 @@ fn read_xml(reader: impl Read) -> Result<String> {
 }
 
 fn read_xml_with_limit(reader: impl Read, limit: u64) -> Result<String> {
-    let mut xml = String::new();
-    reader.take(limit + 1).read_to_string(&mut xml)?;
+    let mut bytes = Vec::new();
+    let mut reader = reader.take(limit + 1);
+    let mut chunk = [0; 65536];
+    loop {
+        crate::mesh::check_cancelled()?;
+        let n = reader.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..n]);
+    }
+    let xml = String::from_utf8(bytes)?;
     if xml.len() as u64 > limit {
         return Err("3MF XML part exceeds 256 MiB limit".into());
     }
@@ -332,6 +347,7 @@ fn validate_xml(xml: &str) -> Result<()> {
     let mut depth = 0usize;
     let mut roots = 0;
     loop {
+        crate::mesh::check_cancelled()?;
         match reader.read_event()? {
             Event::Start(_) => {
                 if depth == 0 {
@@ -359,6 +375,7 @@ fn relationship_root(xml: &str) -> Result<String> {
     let mut reader = Reader::from_str(xml);
     let mut root = None;
     loop {
+        crate::mesh::check_cancelled()?;
         match reader.read_event()? {
             Event::Start(e) | Event::Empty(e) if e.local_name().as_ref() == b"Relationship" => {
                 if attr(&e, b"Type")?.as_deref() == Some(MODEL_RELATIONSHIP) {
@@ -392,6 +409,7 @@ pub(super) fn load_3mf_document(path: &Path) -> Result<ModelDocument> {
     }
     let mut total_bytes = 0u64;
     for i in 0..archive.len() {
+        crate::mesh::check_cancelled()?;
         total_bytes = total_bytes
             .checked_add(archive.by_index(i)?.size())
             .ok_or("3MF archive size overflow")?;
@@ -416,6 +434,7 @@ pub(super) fn load_3mf_document(path: &Path) -> Result<ModelDocument> {
     };
     let mut models = HashMap::new();
     for name in names {
+        crate::mesh::check_cancelled()?;
         let xml = read_xml(archive.by_name(&name)?)?;
         models.insert(name, parse_model(&xml)?);
     }
@@ -454,6 +473,7 @@ fn parse_plates(xml: &str, models: &HashMap<String, Model>, root: &str) -> Resul
     let mut instance_id = None;
     let mut object_id = None;
     loop {
+        crate::mesh::check_cancelled()?;
         match reader.read_event()? {
             Event::Start(e) | Event::Empty(e) => match e.local_name().as_ref() {
                 b"plate" => {
@@ -507,6 +527,7 @@ fn parse_plates(xml: &str, models: &HashMap<String, Model>, root: &str) -> Resul
     let mut budget = Expansion::default();
     let mut total_triangles = 0;
     for spec in specs {
+        crate::mesh::check_cancelled()?;
         let mut triangles = Vec::new();
         for (id, instance) in spec.instances {
             let item = root_model

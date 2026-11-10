@@ -47,6 +47,18 @@ pub const MAX_TRIANGLES: usize = 5_000_000;
 pub const MAX_INPUT_BYTES: u64 = 512 * 1024 * 1024;
 pub type MeshResult<T> = Result<T, Box<dyn std::error::Error>>;
 
+thread_local! { static REQUEST_ID: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) }; }
+pub(crate) fn set_request_id(id: u64) {
+    REQUEST_ID.with(|r| r.set(Some(id)));
+}
+pub(crate) fn check_cancelled() -> MeshResult<()> {
+    if REQUEST_ID.with(|r| r.get().is_some_and(|id| !crate::loading::is_current(id))) {
+        Err("Loading cancelled".into())
+    } else {
+        Ok(())
+    }
+}
+
 pub fn read_limited(path: &std::path::Path) -> MeshResult<Vec<u8>> {
     use std::io::Read;
     let file = std::fs::File::open(path)?;
@@ -54,7 +66,16 @@ pub fn read_limited(path: &std::path::Path) -> MeshResult<Vec<u8>> {
         return Err("Model file exceeds 512 MiB limit".into());
     }
     let mut data = Vec::new();
-    file.take(MAX_INPUT_BYTES + 1).read_to_end(&mut data)?;
+    let mut input = file.take(MAX_INPUT_BYTES + 1);
+    let mut chunk = [0; 65536];
+    loop {
+        check_cancelled()?;
+        let n = input.read(&mut chunk)?;
+        if n == 0 {
+            break;
+        }
+        data.extend_from_slice(&chunk[..n]);
+    }
     if data.len() as u64 > MAX_INPUT_BYTES {
         return Err("Model file exceeds 512 MiB limit".into());
     }
@@ -67,6 +88,9 @@ impl Mesh {
         mesh.bounds_min = Vec3::splat(f32::INFINITY);
         mesh.bounds_max = Vec3::splat(f32::NEG_INFINITY);
         for triangle in triangles {
+            if mesh.vertices.len() % 3072 == 0 {
+                check_cancelled()?;
+            }
             if mesh.vertices.len() / 3 >= MAX_TRIANGLES {
                 return Err("Model exceeds triangle limit".into());
             }

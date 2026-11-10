@@ -92,7 +92,17 @@ fn main() {
     camera.aspect = size.width as f32 / size.height.max(1) as f32;
 
     let initial_mesh = mesh::Mesh::empty();
-    let mut gpu = GpuState::new(window.clone(), &initial_mesh);
+    let mut gpu = match GpuState::new(window.clone(), &initial_mesh) {
+        Ok(gpu) => gpu,
+        Err(error) => {
+            rfd::MessageDialog::new()
+                .set_title("Tangible could not start")
+                .set_description(&error)
+                .set_level(rfd::MessageLevel::Error)
+                .show();
+            return;
+        }
+    };
     gpu.set_antialiasing(true);
     let mut document: Option<Arc<model::ModelDocument>> = None;
     let mut plate_previews: Vec<Option<egui::TextureHandle>> = Vec::new();
@@ -240,6 +250,13 @@ fn main() {
                                 _ => key_event.physical_key == PhysicalKey::Code(KeyCode::KeyO),
                             };
 
+                            if key_event.physical_key == PhysicalKey::Code(KeyCode::KeyF) && !is_ctrl_or_cmd && !egui_ctx.wants_keyboard_input() {
+                                if let Some(info) = &file_info {
+                                    camera.target = info.center;
+                                    camera.distance = camera.fit_distance(info.extent);
+                                    window.request_redraw();
+                                }
+                            }
                             if is_o && (is_ctrl_or_cmd || !egui_ctx.wants_keyboard_input()) {
                                 spawn_open_dialog(proxy.clone());
                             }
@@ -341,6 +358,8 @@ fn main() {
                                                 ) {
                                                     should_update_theme = true;
                                                 }
+                                                ui.checkbox(&mut camera.orthographic, "Orthographic");
+                                                ui.checkbox(&mut gpu.show_edges, "Edges").on_hover_text("Show triangle edges on the shaded model");
                                                 if gpu.msaa_supported {
                                                     ui.add_space(10.0);
                                                     let mut enabled = gpu.sample_count > 1;
@@ -475,49 +494,13 @@ fn main() {
                                 });
 
                             if file_info.is_some() {
-                                egui::Area::new(egui::Id::new("orientation_axes"))
-                                    .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-22.0, -bottom_panel.response.rect.height() - 65.0))
-                                    .interactable(false)
-                                    .show(ctx, |ui| {
-                                        let (rect, _) = ui.allocate_exact_size(egui::vec2(90.0, 90.0), egui::Sense::hover());
-                                        let center = rect.center();
-                                        let view = camera.view_matrix();
-                                        let mut axes = [
-                                            ("X", glam::Vec3::X, egui::Color32::from_rgb(235, 85, 85)),
-                                            ("Y", glam::Vec3::Y, egui::Color32::from_rgb(80, 190, 110)),
-                                            ("Z", glam::Vec3::Z, egui::Color32::from_rgb(85, 145, 245)),
-                                        ].map(|(label, axis, color)| (label, view.transform_vector3(axis), color));
-                                        axes.sort_by(|a, b| a.1.z.total_cmp(&b.1.z));
-                                        let painter = ui.painter();
-                                        for (label, axis, color) in axes {
-                                            let end = center + egui::vec2(axis.x, -axis.y) * 30.0;
-                                            painter.line_segment([center, end], egui::Stroke::new(2.5, color));
-                                            painter.circle_filled(end, 9.0, color);
-                                            painter.text(end, egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(11.0), egui::Color32::WHITE);
-                                        }
-                                        painter.circle_filled(center, 3.0, ui.visuals().text_color());
-                                    });
+                                ui::orientation_axes(ctx, &mut camera, bottom_panel.response.rect.height());
                             }
 
                             if file_info.is_some() {
-                                egui::Area::new(egui::Id::new("floating_reset_view"))
-                                    .order(egui::Order::Foreground)
-                                    .anchor(
-                                        egui::Align2::RIGHT_BOTTOM,
-                                        egui::vec2(-16.0, -bottom_panel.response.rect.height() - 16.0),
-                                    )
-                                    .show(ctx, |ui| {
-                                        let button = egui::Button::new(
-                                            egui::RichText::new("↺  Reset view")
-                                                .color(egui::Color32::from_rgb(35, 43, 54)),
-                                        )
-                                        .fill(egui::Color32::from_rgba_unmultiplied(248, 250, 252, 225))
-                                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_gray(180)))
-                                        .rounding(egui::Rounding::same(6.0));
-                                        if ui.add(button).on_hover_text("Reset camera to center of model").clicked() {
-                                            should_reset_camera = true;
-                                        }
-                                    });
+                                if ui::reset_view_button(ctx, bottom_panel.response.rect.height()) {
+                                    should_reset_camera = true;
+                                }
                             }
 
                             // ── Welcome Screen (when no model loaded) ────────────

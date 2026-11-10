@@ -10,6 +10,7 @@ pub struct Camera {
     pub fov: f32,
     pub near: f32,
     pub far: f32,
+    pub orthographic: bool,
 }
 
 impl Camera {
@@ -23,6 +24,7 @@ impl Camera {
             fov: 45.0_f32.to_radians(),
             near: 0.001,
             far: 10000.0,
+            orthographic: false,
         }
     }
 
@@ -41,7 +43,19 @@ impl Camera {
     pub fn projection_matrix(&self) -> Mat4 {
         let near = (self.distance * 0.01).max(self.near);
         let far = (self.distance * 50.0).max(self.far);
-        Mat4::perspective_rh(self.fov, self.aspect, near, far)
+        if self.orthographic {
+            let half_height = self.distance * (self.fov * 0.5).tan();
+            Mat4::orthographic_rh(
+                -half_height * self.aspect,
+                half_height * self.aspect,
+                -half_height,
+                half_height,
+                near,
+                far,
+            )
+        } else {
+            Mat4::perspective_rh(self.fov, self.aspect, near, far)
+        }
     }
 
     /// Calculate the ideal distance to frame an object of given bounding extent fully within the window.
@@ -82,5 +96,20 @@ impl Camera {
         let scale = self.distance * 0.002;
         self.target -= right * dx * scale;
         self.target += up * dy * scale;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn orthographic_projection_keeps_parallel_lines_parallel() {
+        let mut camera = Camera::new(Vec3::ZERO, 10.0);
+        camera.orthographic = true;
+        let projection = camera.projection_matrix();
+        let near = projection * glam::Vec4::new(1.0, 0.0, -2.0, 1.0);
+        let far = projection * glam::Vec4::new(1.0, 0.0, -8.0, 1.0);
+        assert!((near.x / near.w - far.x / far.w).abs() < 1e-6);
     }
 }

@@ -4,6 +4,9 @@ pub(super) fn parse_obj(text: &str) -> Result<Mesh> {
     let mut points = Vec::<[f32; 3]>::new();
     let mut triangles = Vec::new();
     for (line_no, line) in text.lines().enumerate() {
+        if line_no % 1024 == 0 {
+            crate::mesh::check_cancelled()?;
+        }
         let line = line.split('#').next().unwrap_or("").trim();
         let mut parts = line.split_whitespace();
         match parts.next() {
@@ -108,6 +111,7 @@ fn triangulate_face(face: &[[f32; 3]]) -> Result<Vec<[[f32; 3]; 3]>> {
     let mut remaining: Vec<usize> = (0..face.len()).collect();
     let mut result = Vec::new();
     while remaining.len() > 3 {
+        crate::mesh::check_cancelled()?;
         let mut clipped = false;
         for i in 0..remaining.len() {
             let a = remaining[(i + remaining.len() - 1) % remaining.len()];

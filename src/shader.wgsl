@@ -11,7 +11,7 @@ struct Uniforms {
     ambient: vec3<f32>,
     _pad3: f32,
     eye_pos: vec3<f32>,
-    _pad4: f32,
+    edges: f32,
 };
 
 @group(0) @binding(0)
@@ -26,13 +26,15 @@ struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
     @location(1) world_pos: vec3<f32>,
+    @location(2) barycentric: vec3<f32>,
 };
 
 @vertex
-fn vs_main(in: VertexInput) -> VertexOutput {
+fn vs_main(in: VertexInput, @builtin(vertex_index) index: u32) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = u.mvp * vec4<f32>(in.position, 1.0);
     out.world_normal = (u.normal_matrix * vec4<f32>(in.normal, 0.0)).xyz;
+    out.barycentric = select(select(vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 1.0, 0.0), index % 3u == 1u), vec3<f32>(1.0, 0.0, 0.0), index % 3u == 0u);
     out.world_pos = (u.model * vec4<f32>(in.position, 1.0)).xyz;
     return out;
 }
@@ -62,5 +64,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let object_color = vec3<f32>(0.7, 0.75, 0.8);
     let result = (u.ambient + diffuse + specular) * object_color;
 
-    return vec4<f32>(result, 1.0);
+    let widths = fwidth(in.barycentric);
+    let edge = min(min(smoothstep(0.0, widths.x * 1.2, in.barycentric.x), smoothstep(0.0, widths.y * 1.2, in.barycentric.y)), smoothstep(0.0, widths.z * 1.2, in.barycentric.z));
+    return vec4<f32>(mix(result, mix(vec3<f32>(0.08), result, edge), u.edges), 1.0);
 }

@@ -37,6 +37,10 @@ triangles per model and across plate meshes; component expansion is limited to
 64 levels and 100,000 visits per model or plate collection. Invalid geometry and
 unsupported sizes produce a loading error.
 
+The projection control switches between perspective and orthographic views. Click an
+axis marker to look along that axis, and press **F** to frame the current model.
+The **Edges** control overlays triangle edges on the shaded model.
+
 ## Usage
 
 You can launch the viewer with or without a file:
@@ -69,7 +73,8 @@ cargo build --release
 
 Each push to `main` builds native applications for Linux x86-64, macOS Apple
 silicon, and Windows x86-64 and publishes them on the repository's Releases
-page. Download and extract the archive for your platform to run the application.
+page. Download the executable for your platform and its SHA-256 checksum from the release.
+On Linux or macOS, make the downloaded file executable with `chmod +x <filename>`.
 
 ## Source layout
 

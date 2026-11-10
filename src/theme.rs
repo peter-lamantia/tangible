@@ -43,16 +43,12 @@ pub fn setup_fonts(ctx: &egui::Context) {
 
     fonts.font_data.insert(
         "Inter-Regular".to_owned(),
-        egui::FontData::from_static(include_bytes!(
-            "../assets/fonts/Inter-Regular.ttf"
-        )),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/Inter-Regular.ttf")),
     );
 
     fonts.font_data.insert(
         "Inter-Medium".to_owned(),
-        egui::FontData::from_static(include_bytes!(
-            "../assets/fonts/Inter-Medium.ttf"
-        )),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/Inter-Medium.ttf")),
     );
 
     // Place Inter at the top of Proportional font hierarchy
@@ -246,19 +242,16 @@ pub fn draw_icon(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: e
             let tab_h = s * 0.35;
 
             // Folder back tab
+            painter.line_segment([min, egui::pos2(min.x + tab_w, min.y)], stroke);
             painter.line_segment(
-                [min, egui::pos2(min.x + tab_w, min.y)],
-                stroke,
-            );
-            painter.line_segment(
-                [egui::pos2(min.x + tab_w, min.y), egui::pos2(min.x + tab_w + s * 0.25, min.y + tab_h)],
+                [
+                    egui::pos2(min.x + tab_w, min.y),
+                    egui::pos2(min.x + tab_w + s * 0.25, min.y + tab_h),
+                ],
                 stroke,
             );
             // Folder body
-            let body_rect = egui::Rect::from_min_max(
-                egui::pos2(min.x, min.y + tab_h),
-                max,
-            );
+            let body_rect = egui::Rect::from_min_max(egui::pos2(min.x, min.y + tab_h), max);
             painter.rect_stroke(body_rect, egui::Rounding::same(2.0), stroke);
         }
         Icon::Reset => {
@@ -360,11 +353,17 @@ pub fn draw_icon(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: e
         Icon::Close => {
             let offset = s * 0.6;
             painter.line_segment(
-                [c - egui::vec2(offset, offset), c + egui::vec2(offset, offset)],
+                [
+                    c - egui::vec2(offset, offset),
+                    c + egui::vec2(offset, offset),
+                ],
                 stroke,
             );
             painter.line_segment(
-                [c + egui::vec2(-offset, offset), c + egui::vec2(offset, -offset)],
+                [
+                    c + egui::vec2(-offset, offset),
+                    c + egui::vec2(offset, -offset),
+                ],
                 stroke,
             );
         }
@@ -380,11 +379,7 @@ pub fn draw_icon(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: e
 }
 
 /// Radix-styled button with an integrated vector icon
-pub fn radix_button(
-    ui: &mut egui::Ui,
-    icon: Option<Icon>,
-    label: &str,
-) -> egui::Response {
+pub fn radix_button(ui: &mut egui::Ui, icon: Option<Icon>, label: &str) -> egui::Response {
     let font_id = egui::TextStyle::Button.resolve(ui.style());
     let galley = ui.painter().layout_no_wrap(
         label.to_owned(),
@@ -393,12 +388,14 @@ pub fn radix_button(
     );
 
     let icon_size = 14.0;
-    let icon_gap = if icon.is_some() && !label.is_empty() { 6.0 } else { 0.0 };
+    let icon_gap = if icon.is_some() && !label.is_empty() {
+        6.0
+    } else {
+        0.0
+    };
     let has_icon = icon.is_some();
 
-    let content_w = (if has_icon { icon_size } else { 0.0 })
-        + icon_gap
-        + galley.size().x;
+    let content_w = (if has_icon { icon_size } else { 0.0 }) + icon_gap + galley.size().x;
     let content_h = galley.size().y.max(icon_size);
 
     let padding = ui.style().spacing.button_padding;
@@ -410,12 +407,8 @@ pub fn radix_button(
         let visuals = ui.style().interact(&response);
 
         // Background & border
-        ui.painter().rect(
-            rect,
-            visuals.rounding,
-            visuals.bg_fill,
-            visuals.bg_stroke,
-        );
+        ui.painter()
+            .rect(rect, visuals.rounding, visuals.bg_fill, visuals.bg_stroke);
 
         let mut start_x = rect.min.x + padding.x;
         let center_y = rect.center().y;
@@ -432,10 +425,7 @@ pub fn radix_button(
 
         // Draw label
         if !label.is_empty() {
-            let text_pos = egui::pos2(
-                start_x,
-                center_y - galley.size().y * 0.5,
-            );
+            let text_pos = egui::pos2(start_x, center_y - galley.size().y * 0.5);
             ui.painter().galley(text_pos, galley, visuals.text_color());
         }
     }
@@ -463,7 +453,9 @@ pub fn radix_badge(ui: &mut egui::Ui, icon: Option<Icon>, text: &str) {
     };
 
     let font_id = egui::TextStyle::Small.resolve(ui.style());
-    let galley = ui.painter().layout_no_wrap(text.to_owned(), font_id, text_color);
+    let galley = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font_id, text_color);
 
     let icon_size = 12.0;
     let icon_gap = if icon.is_some() { 5.0 } else { 0.0 };
@@ -471,7 +463,10 @@ pub fn radix_badge(ui: &mut egui::Ui, icon: Option<Icon>, text: &str) {
     let padding = egui::vec2(8.0, 4.0);
 
     let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(total_w + padding.x * 2.0, galley.size().y.max(icon_size) + padding.y * 2.0),
+        egui::vec2(
+            total_w + padding.x * 2.0,
+            galley.size().y.max(icon_size) + padding.y * 2.0,
+        ),
         egui::Sense::hover(),
     );
 
@@ -504,10 +499,7 @@ pub fn radix_badge(ui: &mut egui::Ui, icon: Option<Icon>, text: &str) {
 }
 
 /// Radix Segmented Theme Selector: [ Monitor System | Sun Light | Moon Dark ]
-pub fn theme_segmented_control(
-    ui: &mut egui::Ui,
-    current: &mut ThemePreference,
-) -> bool {
+pub fn theme_segmented_control(ui: &mut egui::Ui, current: &mut ThemePreference) -> bool {
     let options = [
         (ThemePreference::System, Icon::Monitor, "System"),
         (ThemePreference::Light, Icon::Sun, "Light"),
@@ -541,14 +533,20 @@ pub fn theme_segmented_control(
     for (pref, _, label) in &options {
         let is_active = *current == *pref;
         let text_color = if is_active {
-            if is_dark { egui::Color32::WHITE } else { egui::Color32::BLACK }
+            if is_dark {
+                egui::Color32::WHITE
+            } else {
+                egui::Color32::BLACK
+            }
         } else if is_dark {
             egui::Color32::from_rgb(140, 145, 155)
         } else {
             egui::Color32::from_rgb(120, 125, 135)
         };
 
-        let galley = ui.painter().layout_no_wrap((*label).to_owned(), font_id.clone(), text_color);
+        let galley = ui
+            .painter()
+            .layout_no_wrap((*label).to_owned(), font_id.clone(), text_color);
         max_content_h = max_content_h.max(galley.size().y);
         let item_w = icon_size + icon_gap + galley.size().x + padding.x * 2.0;
         item_widths.push(item_w);
@@ -562,10 +560,8 @@ pub fn theme_segmented_control(
     let total_h = item_h + container_margin * 2.0;
 
     // Allocate exact rect in parent UI (handles right_to_left seamlessly as a single block)
-    let (container_rect, _) = ui.allocate_exact_size(
-        egui::vec2(total_w, total_h),
-        egui::Sense::hover(),
-    );
+    let (container_rect, _) =
+        ui.allocate_exact_size(egui::vec2(total_w, total_h), egui::Sense::hover());
 
     let mut changed = false;
 
@@ -584,10 +580,8 @@ pub fn theme_segmented_control(
 
         for (idx, (pref, icon, _)) in options.iter().enumerate() {
             let item_w = item_widths[idx];
-            let item_rect = egui::Rect::from_min_size(
-                egui::pos2(cur_x, cur_y),
-                egui::vec2(item_w, item_h),
-            );
+            let item_rect =
+                egui::Rect::from_min_size(egui::pos2(cur_x, cur_y), egui::vec2(item_w, item_h));
 
             let id = ui.id().with("theme_seg_btn").with(idx);
             let resp = ui.interact(item_rect, id, egui::Sense::click());
@@ -607,22 +601,31 @@ pub fn theme_segmented_control(
                     egui::Color32::WHITE
                 };
                 let active_stroke = if is_dark {
-                    egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30))
+                    egui::Stroke::new(
+                        1.0,
+                        egui::Color32::from_rgba_unmultiplied(255, 255, 255, 30),
+                    )
                 } else {
                     egui::Stroke::new(1.0, egui::Color32::from_rgba_unmultiplied(0, 0, 0, 25))
                 };
-                ui.painter().rect(item_rect, rounding, active_bg, active_stroke);
+                ui.painter()
+                    .rect(item_rect, rounding, active_bg, active_stroke);
             } else if hovered {
                 let hover_bg = if is_dark {
                     egui::Color32::from_rgba_unmultiplied(255, 255, 255, 8)
                 } else {
                     egui::Color32::from_rgba_unmultiplied(0, 0, 0, 8)
                 };
-                ui.painter().rect(item_rect, rounding, hover_bg, egui::Stroke::NONE);
+                ui.painter()
+                    .rect(item_rect, rounding, hover_bg, egui::Stroke::NONE);
             }
 
             let text_color = if is_active {
-                if is_dark { egui::Color32::WHITE } else { egui::Color32::BLACK }
+                if is_dark {
+                    egui::Color32::WHITE
+                } else {
+                    egui::Color32::BLACK
+                }
             } else if is_dark {
                 egui::Color32::from_rgb(140, 145, 155)
             } else {
@@ -640,7 +643,10 @@ pub fn theme_segmented_control(
 
             let galley = galleys[idx].clone();
             ui.painter().galley(
-                egui::pos2(start_x + icon_size + icon_gap, center_y - galley.size().y * 0.5),
+                egui::pos2(
+                    start_x + icon_size + icon_gap,
+                    center_y - galley.size().y * 0.5,
+                ),
                 galley,
                 text_color,
             );
@@ -663,7 +669,10 @@ mod tests {
         apply_theme(&ctx, true);
 
         let raw_input = egui::RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 720.0))),
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::pos2(0.0, 0.0),
+                egui::vec2(1280.0, 720.0),
+            )),
             ..Default::default()
         };
 
@@ -689,7 +698,11 @@ mod tests {
         let primitives = ctx.tessellate(full_output.shapes, 1.0);
         assert!(!primitives.is_empty());
         for prim in &primitives {
-            if let egui::ClippedPrimitive { primitive: egui::epaint::Primitive::Mesh(mesh), .. } = prim {
+            if let egui::ClippedPrimitive {
+                primitive: egui::epaint::Primitive::Mesh(mesh),
+                ..
+            } = prim
+            {
                 for v in &mesh.vertices {
                     assert!(!v.pos.x.is_nan() && !v.pos.y.is_nan());
                 }
@@ -713,7 +726,8 @@ mod tests {
                     Icon::Info,
                 ];
                 for icon in icons {
-                    let (rect, _) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover());
                     draw_icon(ui.painter(), rect, icon, egui::Color32::WHITE);
                 }
             });
@@ -735,4 +749,3 @@ mod tests {
         assert!(pref_dark.is_dark(false));
     }
 }
-

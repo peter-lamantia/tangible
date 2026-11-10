@@ -25,6 +25,9 @@ fn parse_binary_stl(data: &[u8]) -> MeshResult<Mesh> {
     }
     let mut triangles = Vec::with_capacity(count);
     for record in data[84..].chunks_exact(50) {
+        if triangles.len() % 1024 == 0 {
+            crate::mesh::check_cancelled()?;
+        }
         let mut triangle = [[0.0; 3]; 3];
         for (i, p) in triangle.iter_mut().enumerate() {
             for (axis, value) in p.iter_mut().enumerate() {
@@ -46,7 +49,15 @@ fn parse_ascii_stl(data: &[u8]) -> MeshResult<Mesh> {
     let mut loop_done = false;
     let mut solid = false;
     let mut ended = false;
-    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+    for (line_no, line) in text
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .enumerate()
+    {
+        if line_no % 1024 == 0 {
+            crate::mesh::check_cancelled()?;
+        }
         let mut fields = line.split_whitespace();
         match fields.next().unwrap_or("") {
             "solid" if !solid && !ended => solid = true,
