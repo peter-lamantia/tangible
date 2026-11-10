@@ -1,212 +1,157 @@
-use glam::Vec3;
+use crate::mesh::{read_limited, Mesh, MeshResult, MAX_TRIANGLES};
 
-/// A single vertex with position and normal, laid out for GPU upload.
-#[repr(C)]
-#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct Vertex {
-    pub position: [f32; 3],
-    pub normal: [f32; 3],
-}
-
-/// Parsed STL mesh data.
-#[derive(Debug, Clone)]
-pub struct Mesh {
-    pub vertices: Vec<Vertex>,
-    pub bounds_min: Vec3,
-    pub bounds_max: Vec3,
-}
-
-impl Mesh {
-    /// Empty mesh for when no model is loaded yet.
-    pub fn empty() -> Self {
-        Self {
-            vertices: Vec::new(),
-            bounds_min: Vec3::ZERO,
-            bounds_max: Vec3::ZERO,
+/// Load binary or ASCII STL, validating complete triangles in either encoding.
+pub fn load_stl(path: impl AsRef<std::path::Path>) -> MeshResult<Mesh> {
+    let data = read_limited(path.as_ref())?;
+    if data.len() >= 84 {
+        let count = u32::from_le_bytes(data[80..84].try_into()?) as usize;
+        if count.checked_mul(50).and_then(|n| n.checked_add(84)) == Some(data.len()) {
+            return parse_binary_stl(&data);
         }
     }
-
-    /// Center point of the bounding box.
-    pub fn center(&self) -> Vec3 {
-        (self.bounds_min + self.bounds_max) * 0.5
-    }
-
-    /// Diagonal length of the bounding box.
-    pub fn extent(&self) -> f32 {
-        (self.bounds_max - self.bounds_min).length()
-    }
-
-    /// Dimensions (width, height, depth) of the bounding box.
-    pub fn dimensions(&self) -> Vec3 {
-        (self.bounds_max - self.bounds_min).abs()
-    }
-}
-
-/// Load an STL file (auto-detects binary vs ASCII).
-pub fn load_stl(path: impl AsRef<std::path::Path>) -> Result<Mesh, Box<dyn std::error::Error>> {
-    let data = std::fs::read(path)?;
-
-    // Heuristic: try binary first (most STL files are binary)
-    if data.len() > 84 {
-        if let Ok(mesh) = parse_binary_stl(&data) {
-            return Ok(mesh);
-        }
-    }
-
     parse_ascii_stl(&data)
 }
 
-fn read_f32(data: &[u8], offset: usize) -> f32 {
-    f32::from_le_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ])
-}
-
-fn parse_binary_stl(data: &[u8]) -> Result<Mesh, Box<dyn std::error::Error>> {
+fn parse_binary_stl(data: &[u8]) -> MeshResult<Mesh> {
     if data.len() < 84 {
         return Err("File too small for binary STL".into());
     }
-
-    let num_triangles =
-        u32::from_le_bytes([data[80], data[81], data[82], data[83]]) as usize;
-    let expected_size = 84 + num_triangles * 50;
-
-    if data.len() != expected_size {
-        return Err(format!(
-            "Binary STL size mismatch: expected {expected_size}, got {}",
-            data.len()
-        )
-        .into());
+    let count = u32::from_le_bytes(data[80..84].try_into()?) as usize;
+    if count > MAX_TRIANGLES {
+        return Err("STL exceeds triangle limit".into());
     }
-
-    let mut vertices = Vec::with_capacity(num_triangles * 3);
-    let mut bounds_min = Vec3::splat(f32::MAX);
-    let mut bounds_max = Vec3::splat(f32::MIN);
-
-    for i in 0..num_triangles {
-        let base = 84 + i * 50;
-
-        // Read face normal
-        let mut normal = [
-            read_f32(data, base),
-            read_f32(data, base + 4),
-            read_f32(data, base + 8),
-        ];
-
-        // Read 3 vertices
-        let mut face_verts = [[0.0f32; 3]; 3];
-        for v in 0..3 {
-            let vo = base + 12 + v * 12;
-            face_verts[v] = [
-                read_f32(data, vo),
-                read_f32(data, vo + 4),
-                read_f32(data, vo + 8),
-            ];
-        }
-
-        // Recompute normal if the stored one is degenerate
-        let n = Vec3::from(normal);
-        if n.length_squared() < 1e-10 {
-            let v0 = Vec3::from(face_verts[0]);
-            let v1 = Vec3::from(face_verts[1]);
-            let v2 = Vec3::from(face_verts[2]);
-            let computed = (v1 - v0).cross(v2 - v0).normalize_or_zero();
-            normal = computed.to_array();
-        }
-
-        for pos in &face_verts {
-            let p = Vec3::from(*pos);
-            bounds_min = bounds_min.min(p);
-            bounds_max = bounds_max.max(p);
-            vertices.push(Vertex {
-                position: *pos,
-                normal,
-            });
-        }
+    if count.checked_mul(50).and_then(|n| n.checked_add(84)) != Some(data.len()) {
+        return Err("Binary STL size mismatch".into());
     }
-
-    Ok(Mesh {
-        vertices,
-        bounds_min,
-        bounds_max,
-    })
+    let mut triangles = Vec::with_capacity(count);
+    for record in data[84..].chunks_exact(50) {
+        let mut triangle = [[0.0; 3]; 3];
+        for (i, p) in triangle.iter_mut().enumerate() {
+            for (axis, value) in p.iter_mut().enumerate() {
+                let offset = 12 + i * 12 + axis * 4;
+                *value = f32::from_le_bytes(record[offset..offset + 4].try_into()?);
+            }
+        }
+        triangles.push(triangle);
+    }
+    // Derive normals from geometry; file normals are frequently missing or invalid.
+    Mesh::from_triangles(triangles)
 }
 
-fn parse_ascii_stl(data: &[u8]) -> Result<Mesh, Box<dyn std::error::Error>> {
+fn parse_ascii_stl(data: &[u8]) -> MeshResult<Mesh> {
     let text = std::str::from_utf8(data)?;
-    let mut vertices = Vec::new();
-    let mut bounds_min = Vec3::splat(f32::MAX);
-    let mut bounds_max = Vec3::splat(f32::MIN);
-
-    let mut current_normal = [0.0f32; 3];
-    let mut face_verts: Vec<[f32; 3]> = Vec::new();
-
-    for line in text.lines() {
-        let line = line.trim();
-
-        if let Some(rest) = line.strip_prefix("facet normal") {
-            let parts: Vec<&str> = rest.split_whitespace().collect();
-            if parts.len() >= 3 {
-                current_normal = [
-                    parts[0].parse()?,
-                    parts[1].parse()?,
-                    parts[2].parse()?,
-                ];
+    let mut triangles = Vec::new();
+    let mut face: Option<Vec<[f32; 3]>> = None;
+    let mut in_loop = false;
+    let mut loop_done = false;
+    let mut solid = false;
+    let mut ended = false;
+    for line in text.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let mut fields = line.split_whitespace();
+        match fields.next().unwrap_or("") {
+            "solid" if !solid && !ended => solid = true,
+            "facet" if solid && face.is_none() => {
+                if fields.next() != Some("normal") {
+                    return Err("Invalid STL facet normal".into());
+                }
+                let normal = fields
+                    .map(str::parse::<f32>)
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                if normal.len() != 3 {
+                    return Err("Invalid STL facet normal".into());
+                }
+                face = Some(Vec::with_capacity(3));
+                loop_done = false;
             }
-            face_verts.clear();
-        } else if let Some(rest) = line.strip_prefix("vertex") {
-            let parts: Vec<&str> = rest.split_whitespace().collect();
-            if parts.len() >= 3 {
-                let pos: [f32; 3] = [
-                    parts[0].parse()?,
-                    parts[1].parse()?,
-                    parts[2].parse()?,
-                ];
-
-                let p = Vec3::from(pos);
-                bounds_min = bounds_min.min(p);
-                bounds_max = bounds_max.max(p);
-
-                face_verts.push(pos);
+            "outer" if face.is_some() && !in_loop && !loop_done => {
+                if fields.next() != Some("loop") || fields.next().is_some() {
+                    return Err("Invalid STL outer loop".into());
+                }
+                in_loop = true;
             }
-        } else if line.starts_with("endfacet") {
-            // Recompute normal if degenerate
-            let n = Vec3::from(current_normal);
-            let mut normal = current_normal;
-            if n.length_squared() < 1e-10 && face_verts.len() >= 3 {
-                let v0 = Vec3::from(face_verts[0]);
-                let v1 = Vec3::from(face_verts[1]);
-                let v2 = Vec3::from(face_verts[2]);
-                let computed = (v1 - v0).cross(v2 - v0).normalize_or_zero();
-                normal = computed.to_array();
+            "vertex" if in_loop => {
+                let values = fields
+                    .map(str::parse::<f32>)
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                if values.len() != 3 || !values.iter().all(|v| v.is_finite()) {
+                    return Err("Invalid STL vertex".into());
+                }
+                let vertices = face.as_mut().ok_or("STL vertex outside facet")?;
+                if vertices.len() >= 3 {
+                    return Err("STL facet must have exactly three vertices".into());
+                }
+                vertices.push([values[0], values[1], values[2]]);
             }
-
-            for pos in &face_verts {
-                vertices.push(Vertex {
-                    position: *pos,
-                    normal,
-                });
+            "endloop" if in_loop => {
+                in_loop = false;
+                loop_done = true;
             }
+            "endfacet" if face.is_some() && loop_done && !in_loop => {
+                let vertices = face.take().ok_or("Missing STL facet")?;
+                let triangle: [[f32; 3]; 3] = vertices
+                    .try_into()
+                    .map_err(|_| "STL facet must have exactly three vertices")?;
+                if triangles.len() >= MAX_TRIANGLES {
+                    return Err("STL exceeds triangle limit".into());
+                }
+                triangles.push(triangle);
+            }
+            "endsolid" if solid && face.is_none() => {
+                solid = false;
+                ended = true;
+            }
+            _ => return Err(format!("Unexpected or incomplete STL statement: {line}").into()),
         }
     }
-
-    if vertices.is_empty() {
-        return Err("No vertices found in ASCII STL".into());
+    if face.is_some() || in_loop || solid || !ended {
+        return Err("Incomplete ASCII STL".into());
     }
-
-    Ok(Mesh {
-        vertices,
-        bounds_min,
-        bounds_max,
-    })
+    Mesh::from_triangles(triangles)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Vec3;
+
+    fn binary_triangle() -> Vec<u8> {
+        let mut data = vec![0; 134];
+        data[80..84].copy_from_slice(&1u32.to_le_bytes());
+        data[108..112].copy_from_slice(&1f32.to_le_bytes());
+        data[124..128].copy_from_slice(&1f32.to_le_bytes());
+        data
+    }
+
+    #[test]
+    fn binary_validation_and_recomputed_normals() {
+        let mut data = binary_triangle();
+        data[84..88].copy_from_slice(&f32::NAN.to_le_bytes());
+        let mesh = parse_binary_stl(&data).unwrap();
+        assert_eq!(mesh.vertices.len(), 3);
+        assert_eq!(mesh.vertices[0].normal, [0.0, 0.0, 1.0]);
+        data[96..100].copy_from_slice(&f32::INFINITY.to_le_bytes());
+        assert!(parse_binary_stl(&data).is_err());
+        assert!(parse_binary_stl(&data[..100]).is_err());
+        let mut empty = vec![0; 84];
+        assert!(parse_binary_stl(&empty).is_err());
+        empty[80..84].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse_binary_stl(&empty).is_err());
+    }
+
+    #[test]
+    fn ascii_rejects_malformed_facets_and_nonfinite_vertices() {
+        let valid = "solid test\nfacet normal 0 0 0\nouter loop\nvertex 0 0 0\nvertex 1 0 0\nvertex 0 1 0\nendloop\nendfacet\nendsolid test";
+        assert!(parse_ascii_stl(valid.as_bytes()).is_ok());
+        for invalid in [
+            valid.replace("vertex 0 1 0\n", ""),
+            valid.replace("endloop", "vertex 0 0 1\nendloop"),
+            valid.replace("vertex 1 0 0", "vertex NaN 0 0"),
+            valid.replace("endfacet", ""),
+            valid.replace("endsolid test", ""),
+        ] {
+            assert!(parse_ascii_stl(invalid.as_bytes()).is_err(), "{invalid}");
+        }
+    }
 
     #[test]
     fn test_load_ascii_cube() {

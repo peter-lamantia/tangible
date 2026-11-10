@@ -1,785 +1,32 @@
 mod camera;
+mod loading;
+mod mesh;
 mod model;
+mod preview;
+mod renderer;
 mod stl;
 mod theme;
+mod ui;
 
 use std::sync::Arc;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{EventLoop, EventLoopBuilder, EventLoopProxy};
+use winit::event_loop::{EventLoop, EventLoopBuilder};
 use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
-use winit::window::{Window, WindowBuilder};
+use winit::window::WindowBuilder;
 
-use wgpu::util::DeviceExt;
-
-// ── Uniform buffer layout (must match shader) ────────────────────────────────
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct Uniforms {
-    mvp: [[f32; 4]; 4],
-    model: [[f32; 4]; 4],
-    normal_matrix: [[f32; 4]; 4],
-    light_dir: [f32; 3],
-    _pad1: f32,
-    light_color: [f32; 3],
-    _pad2: f32,
-    ambient: [f32; 3],
-    _pad3: f32,
-    eye_pos: [f32; 3],
-    _pad4: f32,
-}
+use loading::{spawn_file_load, spawn_open_dialog, AppEvent};
+use renderer::GpuState;
+use ui::{format_number, plate_tile};
 
 // ── Loaded File Info ─────────────────────────────────────────────────────────
 
 struct FileInfo {
+    units: Option<&'static str>,
     num_triangles: usize,
     dimensions: glam::Vec3,
     center: glam::Vec3,
     extent: f32,
-}
-
-// ── Custom Application Events for Background Tasks ──────────────────────────
-
-#[derive(Debug)]
-enum AppEvent {
-    LoadingStarted {
-        name: String,
-    },
-    MeshLoaded {
-        path: std::path::PathBuf,
-        document: model::ModelDocument,
-    },
-    LoadError {
-        path: std::path::PathBuf,
-        error: String,
-    },
-}
-
-// ── GPU state ────────────────────────────────────────────────────────────────
-
-struct GpuState {
-    surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    config: wgpu::SurfaceConfiguration,
-    pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
-    uniform_buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
-    depth_view: wgpu::TextureView,
-    msaa_view: Option<wgpu::TextureView>,
-    sample_count: u32,
-    msaa_supported: bool,
-    shader: wgpu::ShaderModule,
-    bind_group_layout: wgpu::BindGroupLayout,
-    egui_renderer: egui_wgpu::Renderer,
-    num_vertices: u32,
-}
-
-impl GpuState {
-    fn new(window: Arc<Window>, mesh: &stl::Mesh) -> Self {
-        let size = window.inner_size();
-
-        // ── Instance + Surface + Adapter + Device ────────────────────────
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
-
-        let surface = instance.create_surface(window.clone()).unwrap();
-
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::default(),
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .expect("No suitable GPU adapter found");
-
-        let (device, queue) = pollster::block_on(adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                label: None,
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-            },
-            None,
-        ))
-        .expect("Failed to create GPU device");
-
-        // ── Surface config ───────────────────────────────────────────────
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(caps.formats[0]);
-
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&device, &config);
-
-        let msaa_supported = [format, wgpu::TextureFormat::Depth32Float]
-            .iter()
-            .all(|&format| {
-                adapter
-                    .get_texture_format_features(format)
-                    .flags
-                    .contains(wgpu::TextureFormatFeatureFlags::MULTISAMPLE_X4)
-            });
-
-        // ── Shader ───────────────────────────────────────────────────────
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("Shader"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
-        });
-
-        // ── Buffers ──────────────────────────────────────────────────────
-        let vertex_buffer = Self::create_vertex_buffer(&device, mesh);
-
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Uniform Buffer"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // ── Bind group ───────────────────────────────────────────────────
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Bind Group Layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Bind Group"),
-            layout: &bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: uniform_buffer.as_entire_binding(),
-            }],
-        });
-
-        let sample_count = 1;
-        let pipeline =
-            Self::create_pipeline(&device, &config, &shader, &bind_group_layout, sample_count);
-        let depth_view = Self::create_depth_texture(&device, &config, sample_count);
-        let msaa_view = None;
-
-        let egui_renderer = egui_wgpu::Renderer::new(&device, config.format, None, 1);
-
-        Self {
-            surface,
-            device,
-            queue,
-            config,
-            pipeline,
-            vertex_buffer,
-            uniform_buffer,
-            bind_group,
-            depth_view,
-            msaa_view,
-            sample_count,
-            msaa_supported,
-            shader,
-            bind_group_layout,
-            egui_renderer,
-            num_vertices: mesh.vertices.len() as u32,
-        }
-    }
-
-    fn create_pipeline(
-        device: &wgpu::Device,
-        config: &wgpu::SurfaceConfiguration,
-        shader: &wgpu::ShaderModule,
-        bind_group_layout: &wgpu::BindGroupLayout,
-        sample_count: u32,
-    ) -> wgpu::RenderPipeline {
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<stl::Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            offset: 0,
-                            shader_location: 0,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 12,
-                            shader_location: 1,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                    ],
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, // show both faces
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                ..Default::default()
-            },
-            multiview: None,
-        })
-    }
-
-    fn create_vertex_buffer(device: &wgpu::Device, mesh: &stl::Mesh) -> wgpu::Buffer {
-        if mesh.vertices.is_empty() {
-            let dummy = stl::Vertex {
-                position: [0.0; 3],
-                normal: [0.0; 3],
-            };
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Vertex Buffer (Dummy)"),
-                contents: bytemuck::cast_slice(&[dummy]),
-                usage: wgpu::BufferUsages::VERTEX,
-            })
-        } else {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Vertex Buffer"),
-                contents: bytemuck::cast_slice(&mesh.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            })
-        }
-    }
-
-    fn load_mesh(&mut self, mesh: &stl::Mesh) {
-        self.vertex_buffer = Self::create_vertex_buffer(&self.device, mesh);
-        self.num_vertices = mesh.vertices.len() as u32;
-    }
-
-    fn create_depth_texture(
-        device: &wgpu::Device,
-        config: &wgpu::SurfaceConfiguration,
-        sample_count: u32,
-    ) -> wgpu::TextureView {
-        device
-            .create_texture(&wgpu::TextureDescriptor {
-                label: Some("Depth Texture"),
-                size: wgpu::Extent3d {
-                    width: config.width.max(1),
-                    height: config.height.max(1),
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Depth32Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                view_formats: &[],
-            })
-            .create_view(&wgpu::TextureViewDescriptor::default())
-    }
-
-    fn create_msaa_view(&self) -> Option<wgpu::TextureView> {
-        (self.sample_count > 1).then(|| {
-            self.device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some("MSAA Color Texture"),
-                    size: wgpu::Extent3d {
-                        width: self.config.width,
-                        height: self.config.height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: self.sample_count,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: self.config.format,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[],
-                })
-                .create_view(&wgpu::TextureViewDescriptor::default())
-        })
-    }
-
-    fn set_antialiasing(&mut self, enabled: bool) {
-        let sample_count = if enabled && self.msaa_supported { 4 } else { 1 };
-        if self.sample_count == sample_count {
-            return;
-        }
-        self.sample_count = sample_count;
-        self.pipeline = Self::create_pipeline(
-            &self.device,
-            &self.config,
-            &self.shader,
-            &self.bind_group_layout,
-            sample_count,
-        );
-        self.depth_view = Self::create_depth_texture(&self.device, &self.config, sample_count);
-        self.msaa_view = self.create_msaa_view();
-    }
-
-    fn resize(&mut self, width: u32, height: u32) {
-        if width > 0 && height > 0 {
-            self.config.width = width;
-            self.config.height = height;
-            self.surface.configure(&self.device, &self.config);
-            self.depth_view =
-                Self::create_depth_texture(&self.device, &self.config, self.sample_count);
-            self.msaa_view = self.create_msaa_view();
-        }
-    }
-
-    fn render(
-        &mut self,
-        cam: &camera::Camera,
-        egui_ctx: &egui::Context,
-        egui_shapes: Vec<egui::epaint::ClippedShape>,
-        textures_delta: &egui::TexturesDelta,
-        pixels_per_point: f32,
-        scene_left: u32,
-        is_dark: bool,
-    ) {
-        let output = match self.surface.get_current_texture() {
-            Ok(t) => t,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.surface.configure(&self.device, &self.config);
-                return;
-            }
-            Err(e) => {
-                log::error!("Surface error: {e}");
-                return;
-            }
-        };
-
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
-        // Build 3D uniforms with theme-adaptive ambient and light colors
-        let model = glam::Mat4::IDENTITY;
-        let view_mat = cam.view_matrix();
-        let proj = cam.projection_matrix();
-        let mvp = proj * view_mat * model;
-
-        let ambient = if is_dark {
-            [0.18, 0.18, 0.22]
-        } else {
-            [0.34, 0.35, 0.38]
-        };
-
-        let light_color = if is_dark {
-            [1.0, 0.98, 0.95]
-        } else {
-            [0.94, 0.95, 0.98]
-        };
-
-        let uniforms = Uniforms {
-            mvp: mvp.to_cols_array_2d(),
-            model: model.to_cols_array_2d(),
-            normal_matrix: model.inverse().transpose().to_cols_array_2d(),
-            light_dir: glam::Vec3::new(0.5, 1.0, 0.8).normalize().to_array(),
-            _pad1: 0.0,
-            light_color,
-            _pad2: 0.0,
-            ambient,
-            _pad3: 0.0,
-            eye_pos: cam.eye().to_array(),
-            _pad4: 0.0,
-        };
-        self.queue
-            .write_buffer(&self.uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
-
-        // Egui texture updates
-        for (id, delta) in &textures_delta.set {
-            self.egui_renderer
-                .update_texture(&self.device, &self.queue, *id, delta);
-        }
-
-        let clipped_primitives = egui_ctx.tessellate(egui_shapes, pixels_per_point);
-        let screen_descriptor = egui_wgpu::ScreenDescriptor {
-            size_in_pixels: [self.config.width, self.config.height],
-            pixels_per_point,
-        };
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
-
-        self.egui_renderer.update_buffers(
-            &self.device,
-            &self.queue,
-            &mut encoder,
-            &clipped_primitives,
-            &screen_descriptor,
-        );
-
-        // Pass 1: 3D Scene
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("3D Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: self.msaa_view.as_ref().unwrap_or(&view),
-                    resolve_target: self.msaa_view.as_ref().map(|_| &view),
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(theme::clear_color(is_dark)),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            if self.num_vertices > 0 {
-                let left = scene_left.min(self.config.width.saturating_sub(1));
-                let width = self.config.width - left;
-                pass.set_viewport(
-                    left as f32,
-                    0.0,
-                    width as f32,
-                    self.config.height as f32,
-                    0.0,
-                    1.0,
-                );
-                pass.set_scissor_rect(left, 0, width, self.config.height);
-                pass.set_pipeline(&self.pipeline);
-                pass.set_bind_group(0, &self.bind_group, &[]);
-                pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                pass.draw(0..self.num_vertices, 0..1);
-            }
-        }
-
-        // Pass 2: egui UI overlay
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("egui Render Pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-
-            self.egui_renderer
-                .render(&mut pass, &clipped_primitives, &screen_descriptor);
-        }
-
-        self.queue.submit(std::iter::once(encoder.finish()));
-        output.present();
-
-        for id in &textures_delta.free {
-            self.egui_renderer.free_texture(id);
-        }
-    }
-}
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-fn format_number(n: usize) -> String {
-    let s = n.to_string();
-    let mut result = String::new();
-    let chars: Vec<char> = s.chars().collect();
-    for (i, c) in chars.iter().enumerate() {
-        if i > 0 && (chars.len() - i) % 3 == 0 {
-            result.push(',');
-        }
-        result.push(*c);
-    }
-    result
-}
-
-fn plate_preview(mesh: &stl::Mesh) -> egui::ColorImage {
-    const SIZE: usize = 400;
-    let background = egui::Color32::TRANSPARENT;
-    let mut image = egui::ColorImage::new([SIZE, SIZE], background);
-    if mesh.vertices.is_empty() {
-        return image;
-    }
-    const SAMPLES: [(f32, f32); 4] = [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)];
-    let mut depth = vec![f32::INFINITY; SIZE * SIZE * SAMPLES.len()];
-    let mut colors = vec![background; SIZE * SIZE * SAMPLES.len()];
-    let mut camera = camera::Camera::new(mesh.center(), 5.0);
-    camera.aspect = 1.0;
-    camera.frame_target(mesh.center(), mesh.extent());
-    let mvp = camera.projection_matrix() * camera.view_matrix();
-    let light = glam::Vec3::new(0.5, 1.0, 0.8).normalize();
-    let eye = camera.eye();
-    for triangle in mesh.vertices.chunks_exact(3) {
-        let mut screen = [[0.0f32; 3]; 3];
-        let mut valid = true;
-        for (i, vertex) in triangle.iter().enumerate() {
-            let clip = mvp * glam::Vec3::from(vertex.position).extend(1.0);
-            if clip.w <= 0.0 {
-                valid = false;
-                break;
-            }
-            let ndc = clip.truncate() / clip.w;
-            screen[i] = [
-                (ndc.x * 0.5 + 0.5) * SIZE as f32,
-                (0.5 - ndc.y * 0.5) * SIZE as f32,
-                ndc.z,
-            ];
-        }
-        if !valid {
-            continue;
-        }
-        let edge = |a: [f32; 3], b: [f32; 3], x: f32, y: f32| {
-            (x - a[0]) * (b[1] - a[1]) - (y - a[1]) * (b[0] - a[0])
-        };
-        let area = edge(screen[0], screen[1], screen[2][0], screen[2][1]);
-        if area.abs() < 1e-8 {
-            continue;
-        }
-        let x_min = screen
-            .iter()
-            .map(|p| p[0])
-            .fold(f32::INFINITY, f32::min)
-            .floor()
-            .max(0.0) as usize;
-        let x_max = screen
-            .iter()
-            .map(|p| p[0])
-            .fold(f32::NEG_INFINITY, f32::max)
-            .ceil()
-            .min((SIZE - 1) as f32) as usize;
-        let y_min = screen
-            .iter()
-            .map(|p| p[1])
-            .fold(f32::INFINITY, f32::min)
-            .floor()
-            .max(0.0) as usize;
-        let y_max = screen
-            .iter()
-            .map(|p| p[1])
-            .fold(f32::NEG_INFINITY, f32::max)
-            .ceil()
-            .min((SIZE - 1) as f32) as usize;
-        if x_min > x_max || y_min > y_max {
-            continue;
-        }
-        let mut normal = glam::Vec3::from(triangle[0].normal).normalize_or_zero();
-        if normal.dot(light) < 0.0 {
-            normal = -normal;
-        }
-        let diffuse = normal.dot(light).max(0.0);
-        let center = (glam::Vec3::from(triangle[0].position)
-            + glam::Vec3::from(triangle[1].position)
-            + glam::Vec3::from(triangle[2].position))
-            / 3.0;
-        let half_dir = (light + (eye - center).normalize_or_zero()).normalize_or_zero();
-        let specular = normal.dot(half_dir).max(0.0).powf(32.0) * 0.3;
-        let intensity = 0.18 + diffuse + specular;
-        let color = egui::Color32::from_rgb(
-            (0.7 * intensity * 255.0).clamp(0.0, 255.0) as u8,
-            (0.75 * intensity * 255.0).clamp(0.0, 255.0) as u8,
-            (0.8 * intensity * 255.0).clamp(0.0, 255.0) as u8,
-        );
-        for y in y_min..=y_max {
-            for x in x_min..=x_max {
-                for (sample, (dx, dy)) in SAMPLES.iter().enumerate() {
-                let px = x as f32 + dx;
-                let py = y as f32 + dy;
-                let w0 = edge(screen[1], screen[2], px, py) / area;
-                let w1 = edge(screen[2], screen[0], px, py) / area;
-                let w2 = 1.0 - w0 - w1;
-                if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
-                    continue;
-                }
-                let z = w0 * screen[0][2] + w1 * screen[1][2] + w2 * screen[2][2];
-                let index = (y * SIZE + x) * SAMPLES.len() + sample;
-                if z < depth[index] {
-                    depth[index] = z;
-                    colors[index] = color;
-                }
-                }
-            }
-        }
-    }
-    for (pixel, samples) in image.pixels.iter_mut().zip(colors.chunks_exact(SAMPLES.len())) {
-        let mut sum = [0u32; 4];
-        for sample in samples {
-            for (total, channel) in sum.iter_mut().zip(sample.to_array()) {
-                *total += u32::from(channel);
-            }
-        }
-        *pixel = egui::Color32::from_rgba_premultiplied(
-            (sum[0] / 4) as u8, (sum[1] / 4) as u8,
-            (sum[2] / 4) as u8, (sum[3] / 4) as u8,
-        );
-    }
-    image
-}
-
-fn plate_tile(
-    ui: &mut egui::Ui,
-    label: &str,
-    texture: &egui::TextureHandle,
-    selected: bool,
-) -> bool {
-    let width = (ui.available_width() - 8.0).clamp(16.0, 360.0);
-    let image_size = width - 16.0;
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, image_size + 44.0), egui::Sense::click());
-    let fill = if selected {
-        egui::Color32::from_rgb(30, 75, 160)
-    } else if ui.visuals().dark_mode {
-        egui::Color32::from_rgb(38, 41, 50)
-    } else {
-        egui::Color32::from_rgb(235, 238, 242)
-    };
-    let text_color = if selected || ui.visuals().dark_mode {
-        egui::Color32::WHITE
-    } else {
-        egui::Color32::from_rgb(24, 26, 32)
-    };
-    ui.painter().rect_filled(rect, 6.0, fill);
-    let image_rect = egui::Rect::from_min_size(
-        rect.min + egui::vec2(8.0, 8.0),
-        egui::vec2(image_size, image_size),
-    );
-    let preview_bg = if ui.visuals().dark_mode {
-        egui::Color32::from_rgb(32, 39, 49)
-    } else {
-        egui::Color32::from_rgb(235, 238, 242)
-    };
-    ui.painter().rect_filled(image_rect, 0.0, preview_bg);
-    ui.painter().image(
-        texture.id(),
-        image_rect,
-        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
-        egui::Color32::WHITE,
-    );
-    ui.painter().text(
-        egui::pos2(rect.center().x, rect.bottom() - 20.0),
-        egui::Align2::CENTER_CENTER,
-        label,
-        egui::TextStyle::Body.resolve(ui.style()),
-        text_color,
-    );
-    ui.add_space(8.0);
-    response.clicked()
-}
-
-#[cfg(test)]
-#[test]
-fn plate_preview_renders_geometry() {
-    let mesh = stl::Mesh {
-        vertices: vec![
-            stl::Vertex {
-                position: [-1.0, -1.0, 0.0],
-                normal: [0.0, 0.0, 1.0],
-            },
-            stl::Vertex {
-                position: [1.0, -1.0, 0.0],
-                normal: [0.0, 0.0, 1.0],
-            },
-            stl::Vertex {
-                position: [0.0, 1.0, 0.0],
-                normal: [0.0, 0.0, 1.0],
-            },
-        ],
-        bounds_min: glam::Vec3::new(-1.0, -1.0, 0.0),
-        bounds_max: glam::Vec3::new(1.0, 1.0, 0.0),
-    };
-    let preview = plate_preview(&mesh);
-    assert_eq!(preview.size, [400, 400]);
-    assert!(preview
-        .pixels
-        .iter()
-        .any(|pixel| *pixel != egui::Color32::TRANSPARENT));
-}
-
-/// Spawns the native file picker on a background thread so the window event loop never freezes.
-fn spawn_open_dialog(proxy: EventLoopProxy<AppEvent>) {
-    std::thread::spawn(move || {
-        let dialog = rfd::FileDialog::new()
-            .add_filter("3D Models (*.stl, *.obj, *.3mf)", &["stl", "obj", "3mf"])
-            .set_title("Open 3D Model");
-
-        if let Some(path) = dialog.pick_file() {
-            spawn_file_load(path, proxy);
-        }
-    });
-}
-
-/// Reads and parses an STL file on a background thread, notifying the main loop via proxy.
-fn spawn_file_load(path: std::path::PathBuf, proxy: EventLoopProxy<AppEvent>) {
-    let file_name = path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-
-    let _ = proxy.send_event(AppEvent::LoadingStarted { name: file_name });
-
-    std::thread::spawn(move || match model::load_document(&path) {
-        Ok(document) => {
-            let _ = proxy.send_event(AppEvent::MeshLoaded { path, document });
-        }
-        Err(e) => {
-            let _ = proxy.send_event(AppEvent::LoadError {
-                path,
-                error: e.to_string(),
-            });
-        }
-    });
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────────
@@ -798,9 +45,7 @@ fn main() {
     // winit 0.29 does not deliver file-drop events on Wayland. Prefer X11
     // (including XWayland) when available, unless the user chose a backend.
     #[cfg(target_os = "linux")]
-    if std::env::var_os("WINIT_UNIX_BACKEND").is_none()
-        && std::env::var_os("DISPLAY").is_some()
-    {
+    if std::env::var_os("WINIT_UNIX_BACKEND").is_none() && std::env::var_os("DISPLAY").is_some() {
         use winit::platform::x11::EventLoopBuilderExtX11;
         event_loop_builder.with_x11();
     }
@@ -846,11 +91,11 @@ fn main() {
     let size = window.inner_size();
     camera.aspect = size.width as f32 / size.height.max(1) as f32;
 
-    let initial_mesh = stl::Mesh::empty();
+    let initial_mesh = mesh::Mesh::empty();
     let mut gpu = GpuState::new(window.clone(), &initial_mesh);
     gpu.set_antialiasing(true);
-    let mut document: Option<model::ModelDocument> = None;
-    let mut plate_previews: Vec<egui::TextureHandle> = Vec::new();
+    let mut document: Option<Arc<model::ModelDocument>> = None;
+    let mut plate_previews: Vec<Option<egui::TextureHandle>> = Vec::new();
     let mut all_preview: Option<egui::TextureHandle> = None;
     let mut selected_plate: Option<usize> = None;
     let mut plates_collapsed = false;
@@ -884,12 +129,14 @@ fn main() {
         .run(move |event, elwt| match event {
             // ── Background Task Events ───────────────────────────────────────
             Event::UserEvent(app_event) => match app_event {
-                AppEvent::LoadingStarted { name } => {
+                AppEvent::LoadingStarted { id, name } => {
+                    if !loading::is_current(id) { return; }
                     loading_name = Some(name);
                     error_message = None;
                     window.request_redraw();
                 }
-                AppEvent::MeshLoaded { path, document: loaded } => {
+                AppEvent::MeshLoaded { id, path, document: loaded } => {
+                    if !loading::is_current(id) { return; }
                     let mesh = &loaded.mesh;
                     let num_triangles = mesh.vertices.len() / 3;
                     let center = mesh.center();
@@ -906,22 +153,30 @@ fn main() {
                     window.set_title(&format!("Tangible — {file_name}"));
 
                     file_info = Some(FileInfo {
+                        units: loaded.units,
                         num_triangles,
                         dimensions: dims,
                         center,
                         extent,
                     });
-                    all_preview = Some(egui_ctx.load_texture("all-plates-preview", plate_preview(&loaded.mesh), egui::TextureOptions::LINEAR));
-                    plate_previews = loaded.plates.iter().enumerate().map(|(i, plate)| {
-                        egui_ctx.load_texture(format!("plate-preview-{i}"), plate_preview(&plate.mesh), egui::TextureOptions::LINEAR)
-                    }).collect();
+                    all_preview = None;
+                    plate_previews = vec![None; loaded.plates.len()];
                     selected_plate = None;
                     document = Some(loaded);
                     loading_name = None;
                     error_message = None;
                     window.request_redraw();
                 }
-                AppEvent::LoadError { path, error } => {
+                AppEvent::PreviewReady { id, plate, image } => {
+                    if !loading::is_current(id) { return; }
+                    let texture = egui_ctx.load_texture(format!("preview-{id}-{plate:?}"), image, egui::TextureOptions::LINEAR);
+                    if let Some(index) = plate {
+                        if let Some(slot) = plate_previews.get_mut(index) { *slot = Some(texture); }
+                    } else { all_preview = Some(texture); }
+                    window.request_redraw();
+                }
+                AppEvent::LoadError { id, path, error } => {
+                    if !loading::is_current(id) { return; }
                     loading_name = None;
                     error_message =
                         Some(format!("Failed to load \"{}\": {error}", path.display()));
@@ -1155,11 +410,11 @@ fn main() {
                                                 ui.style_mut().spacing.scroll.floating = false;
                                                 ui.style_mut().spacing.scroll.bar_inner_margin = 6.0;
                                                 egui::ScrollArea::vertical().show(ui, |ui| {
-                                                    if plate_tile(ui, "All plates", all_preview.as_ref().unwrap(), selected_plate.is_none()) {
+                                                    if plate_tile(ui, "All plates", all_preview.as_ref(), selected_plate.is_none()) {
                                                         requested_plate = Some(None);
                                                     }
                                                     for (index, plate) in doc.plates.iter().enumerate() {
-                                                        if plate_tile(ui, &plate.name, &plate_previews[index], selected_plate == Some(index)) {
+                                                        if plate_tile(ui, &plate.name, plate_previews[index].as_ref(), selected_plate == Some(index)) {
                                                             requested_plate = Some(Some(index));
                                                         }
                                                     }
@@ -1193,8 +448,9 @@ fn main() {
                                                 if let Some(info) = &file_info {
                                                     let color = ui.visuals().widgets.noninteractive.text_color();
                                                     ui.label(egui::RichText::new(format!(
-                                                        "{:.1} × {:.1} × {:.1}",
-                                                        info.dimensions.x, info.dimensions.y, info.dimensions.z
+                                                        "{:.1} × {:.1} × {:.1}{}",
+                                                        info.dimensions.x, info.dimensions.y, info.dimensions.z,
+                                                        if info.units == Some("mm") { " mm" } else { "" }
                                                     )).small().color(color));
                                                     ui.add_space(16.0);
                                                     ui.label(egui::RichText::new(format!(
