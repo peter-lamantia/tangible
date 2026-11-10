@@ -227,7 +227,6 @@ pub enum Icon {
     Sun,
     Moon,
     Monitor,
-    Cube,
     Ruler,
     Close,
     Info,
@@ -337,29 +336,6 @@ pub fn draw_icon(painter: &egui::Painter, rect: egui::Rect, icon: Icon, color: e
             let base_l = stand_bottom - egui::vec2(s * 0.45, 0.0);
             let base_r = stand_bottom + egui::vec2(s * 0.45, 0.0);
             painter.line_segment([base_l, base_r], stroke);
-        }
-        Icon::Cube => {
-            // Isometric cube
-            let top = c - egui::vec2(0.0, s * 0.85);
-            let bottom = c + egui::vec2(0.0, s * 0.85);
-            let center_mid = c;
-            let left = c + egui::vec2(-s * 0.75, -s * 0.4);
-            let right = c + egui::vec2(s * 0.75, -s * 0.4);
-            let bot_left = c + egui::vec2(-s * 0.75, s * 0.4);
-            let bot_right = c + egui::vec2(s * 0.75, s * 0.4);
-
-            // Perimeter
-            painter.line_segment([top, right], stroke);
-            painter.line_segment([right, bot_right], stroke);
-            painter.line_segment([bot_right, bottom], stroke);
-            painter.line_segment([bottom, bot_left], stroke);
-            painter.line_segment([bot_left, left], stroke);
-            painter.line_segment([left, top], stroke);
-
-            // Inner Y
-            painter.line_segment([top, center_mid], stroke);
-            painter.line_segment([center_mid, bot_left], stroke);
-            painter.line_segment([center_mid, bot_right], stroke);
         }
         Icon::Ruler => {
             // Bounding box / dimension icon
@@ -732,7 +708,6 @@ mod tests {
                     Icon::Sun,
                     Icon::Moon,
                     Icon::Monitor,
-                    Icon::Cube,
                     Icon::Ruler,
                     Icon::Close,
                     Icon::Info,

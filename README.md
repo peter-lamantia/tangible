@@ -1,6 +1,6 @@
-# STL Viewer
+# Tangible
 
-A simple, cross-platform STL file viewer written in Rust.
+A simple, cross-platform STL, OBJ, and 3MF file viewer written in Rust.
 
 ![Platforms](https://img.shields.io/badge/platforms-Windows%20%7C%20macOS%20%7C%20Linux-blue)
 
@@ -10,17 +10,19 @@ A simple, cross-platform STL file viewer written in Rust.
 - **GUI File Opening** — native file dialog (`rfd`), top bar button, and drag-and-drop
 - **Launch with or without files** — shows a welcome screen when launched directly
 - **GPU-accelerated** — uses `wgpu` (Vulkan / Metal / DX12)
-- **Binary & ASCII STL** — auto-detects format with auto-normal calculation
+- **STL, OBJ & 3MF** — binary and ASCII STL, polygonal OBJ, and zipped 3MF models
 - **Orbit camera** — rotate, pan, and zoom with mouse
 - **Blinn-Phong lighting** — two-sided shading
+- **Antialiasing setting** — 4× MSAA enabled by default on supported GPUs
+- **3MF plate selection** — shaded square previews for all plates and each individual plate, with a resizable and collapsible panel
 - **Model details** — displays filename, triangle/vertex counts, and bounding box dimensions
 
 ## Controls
 
 | Input                  | Action                        |
 |------------------------|-------------------------------|
-| **📂 Open STL Button** | Open native file picker       |
-| **Drag & Drop**        | Drop any `.stl` into window   |
+| **📂 Open Model Button** | Open native file picker       |
+| **Drag & Drop**        | Drop `.stl`, `.obj`, or `.3mf` into window   |
 | `Ctrl + O` / `Cmd + O` | Open file picker dialog       |
 | `O` key                | Open file picker dialog       |
 | **🔄 Reset View**      | Re-center camera on model     |
@@ -38,7 +40,7 @@ You can launch the viewer with or without a file:
 cargo run --release
 
 # Or launch with a file directly
-cargo run --release -- path/to/model.stl
+cargo run --release -- path/to/model.obj
 ```
 
 ## Building

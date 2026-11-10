@@ -16,3 +16,5 @@ rfd = "0.17"
 egui = "0.28"
 egui-winit = { version = "0.28", default-features = false, features = ["clipboard", "links"] }
 egui-wgpu = { version = "0.28", features = ["winit"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.41"
