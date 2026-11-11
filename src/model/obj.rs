@@ -2,7 +2,7 @@ use super::Result;
 use crate::mesh::{Mesh, MAX_TRIANGLES};
 pub(super) fn parse_obj(text: &str) -> Result<Mesh> {
     let mut points = Vec::<[f32; 3]>::new();
-    let mut triangles = Vec::new();
+    let mut mesh = Mesh::triangle_builder(0);
     for (line_no, line) in text.lines().enumerate() {
         if line_no % 1024 == 0 {
             crate::mesh::check_cancelled()?;
@@ -57,22 +57,23 @@ pub(super) fn parse_obj(text: &str) -> Result<Mesh> {
                     )
                     .into());
                 }
-                if triangles.len() + face.len() - 2 > MAX_TRIANGLES {
+                if mesh.vertices.len() / 3 + face.len() - 2 > MAX_TRIANGLES {
                     return Err("OBJ exceeds triangle limit".into());
                 }
-                triangles.extend(
-                    triangulate_face(&face)
-                        .map_err(|e| format!("OBJ line {}: {e}", line_no + 1))?,
-                );
+                for triangle in
+                    triangulate_face(&face).map_err(|e| format!("OBJ line {}: {e}", line_no + 1))?
+                {
+                    mesh.push_triangle(triangle)?;
+                }
             }
             _ => {}
         }
     }
-    Mesh::from_triangles(triangles)
+    mesh.finish()
 }
 
 // Ear clipping preserves the interior of simple concave polygons in either winding.
-fn triangulate_face(face: &[[f32; 3]]) -> Result<Vec<[[f32; 3]; 3]>> {
+pub(super) fn triangulate_face(face: &[[f32; 3]]) -> Result<Vec<[[f32; 3]; 3]>> {
     let points: Vec<_> = face
         .iter()
         .map(|p| glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64))

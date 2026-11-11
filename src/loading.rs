@@ -42,7 +42,10 @@ pub(crate) enum AppEvent {
 pub(crate) fn spawn_open_dialog(proxy: EventLoopProxy<AppEvent>) {
     std::thread::spawn(move || {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("3D Models (*.stl, *.obj, *.3mf)", &["stl", "obj", "3mf"])
+            .add_filter(
+                "3D Models (*.stl, *.obj, *.3mf, *.off, *.ply, *.gltf, *.glb)",
+                &["stl", "obj", "3mf", "off", "ply", "gltf", "glb"],
+            )
             .set_title("Open 3D Model")
             .pick_file()
         {

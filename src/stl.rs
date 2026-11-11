@@ -23,9 +23,9 @@ fn parse_binary_stl(data: &[u8]) -> MeshResult<Mesh> {
     if count.checked_mul(50).and_then(|n| n.checked_add(84)) != Some(data.len()) {
         return Err("Binary STL size mismatch".into());
     }
-    let mut triangles = Vec::with_capacity(count);
+    let mut mesh = Mesh::triangle_builder(count);
     for record in data[84..].as_chunks::<50>().0 {
-        if triangles.len() % 1024 == 0 {
+        if mesh.vertices.len() / 3 % 1024 == 0 {
             crate::mesh::check_cancelled()?;
         }
         let mut triangle = [[0.0; 3]; 3];
@@ -35,16 +35,16 @@ fn parse_binary_stl(data: &[u8]) -> MeshResult<Mesh> {
                 *value = f32::from_le_bytes(record[offset..offset + 4].try_into()?);
             }
         }
-        triangles.push(triangle);
+        mesh.push_triangle(triangle)?;
     }
     // Derive normals from geometry; file normals are frequently missing or invalid.
-    Mesh::from_triangles(triangles)
+    mesh.finish()
 }
 
 fn parse_ascii_stl(data: &[u8]) -> MeshResult<Mesh> {
     let text = std::str::from_utf8(data)?;
-    let mut triangles = Vec::new();
-    let mut face: Option<Vec<[f32; 3]>> = None;
+    let mut mesh = Mesh::triangle_builder(0);
+    let mut face: Option<([[f32; 3]; 3], usize)> = None;
     let mut in_loop = false;
     let mut loop_done = false;
     let mut solid = false;
@@ -65,13 +65,11 @@ fn parse_ascii_stl(data: &[u8]) -> MeshResult<Mesh> {
                 if fields.next() != Some("normal") {
                     return Err("Invalid STL facet normal".into());
                 }
-                let normal = fields
-                    .map(str::parse::<f32>)
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                if normal.len() != 3 {
+                let _normal = parse_vector(&mut fields)?;
+                if fields.next().is_some() {
                     return Err("Invalid STL facet normal".into());
                 }
-                face = Some(Vec::with_capacity(3));
+                face = Some(([[0.0; 3]; 3], 0));
                 loop_done = false;
             }
             "outer" if face.is_some() && !in_loop && !loop_done => {
@@ -81,17 +79,16 @@ fn parse_ascii_stl(data: &[u8]) -> MeshResult<Mesh> {
                 in_loop = true;
             }
             "vertex" if in_loop => {
-                let values = fields
-                    .map(str::parse::<f32>)
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                if values.len() != 3 || !values.iter().all(|v| v.is_finite()) {
+                let values = parse_vector(&mut fields)?;
+                if fields.next().is_some() || !values.iter().all(|v| v.is_finite()) {
                     return Err("Invalid STL vertex".into());
                 }
                 let vertices = face.as_mut().ok_or("STL vertex outside facet")?;
-                if vertices.len() >= 3 {
+                if vertices.1 >= 3 {
                     return Err("STL facet must have exactly three vertices".into());
                 }
-                vertices.push([values[0], values[1], values[2]]);
+                vertices.0[vertices.1] = values;
+                vertices.1 += 1;
             }
             "endloop" if in_loop => {
                 in_loop = false;
@@ -99,13 +96,14 @@ fn parse_ascii_stl(data: &[u8]) -> MeshResult<Mesh> {
             }
             "endfacet" if face.is_some() && loop_done && !in_loop => {
                 let vertices = face.take().ok_or("Missing STL facet")?;
-                let triangle: [[f32; 3]; 3] = vertices
-                    .try_into()
-                    .map_err(|_| "STL facet must have exactly three vertices")?;
-                if triangles.len() >= MAX_TRIANGLES {
+                if vertices.1 != 3 {
+                    return Err("STL facet must have exactly three vertices".into());
+                }
+                let triangle = vertices.0;
+                if mesh.vertices.len() / 3 >= MAX_TRIANGLES {
                     return Err("STL exceeds triangle limit".into());
                 }
-                triangles.push(triangle);
+                mesh.push_triangle(triangle)?;
             }
             "endsolid" if solid && face.is_none() => {
                 solid = false;
@@ -117,7 +115,7 @@ fn parse_ascii_stl(data: &[u8]) -> MeshResult<Mesh> {
     if face.is_some() || in_loop || solid || !ended {
         return Err("Incomplete ASCII STL".into());
     }
-    Mesh::from_triangles(triangles)
+    mesh.finish()
 }
 
 #[cfg(test)]
@@ -172,4 +170,12 @@ mod tests {
         assert_eq!(mesh.bounds_max, Vec3::new(1.0, 1.0, 1.0));
         assert_eq!(mesh.center(), Vec3::new(0.5, 0.5, 0.5));
     }
+}
+
+fn parse_vector<'a>(fields: &mut impl Iterator<Item = &'a str>) -> MeshResult<[f32; 3]> {
+    let mut values = [0.0; 3];
+    for value in &mut values {
+        *value = fields.next().ok_or("Missing coordinate")?.parse()?;
+    }
+    Ok(values)
 }

@@ -628,7 +628,7 @@ fn main() {
                                                                 ui.add_space(14.0);
                                                                 ui.label(
                                                                     egui::RichText::new(
-                                                                        "or drag & drop a .stl, .obj, or .3mf file anywhere",
+                                                                        "or drag & drop a .stl, .obj, .3mf, .off, .ply, .gltf, or .glb file anywhere",
                                                                     )
                                                                     .small()
                                                                     .weak(),

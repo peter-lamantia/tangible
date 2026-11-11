@@ -11,7 +11,7 @@ pub struct Vertex {
 /// Shared triangle mesh data.
 #[derive(Debug, Clone)]
 pub struct Mesh {
-    pub vertices: Vec<Vertex>,
+    pub vertices: std::sync::Arc<Vec<Vertex>>,
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
 }
@@ -20,7 +20,7 @@ impl Mesh {
     /// Empty mesh for when no model is loaded yet.
     pub fn empty() -> Self {
         Self {
-            vertices: Vec::new(),
+            vertices: std::sync::Arc::new(Vec::new()),
             bounds_min: Vec3::ZERO,
             bounds_max: Vec3::ZERO,
         }
@@ -43,7 +43,7 @@ impl Mesh {
 }
 
 // Limits apply before allocating expanded geometry or reading whole input files.
-pub const MAX_TRIANGLES: usize = 5_000_000;
+pub const MAX_TRIANGLES: usize = 10_000_000;
 pub const MAX_INPUT_BYTES: u64 = 512 * 1024 * 1024;
 pub type MeshResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -83,41 +83,58 @@ pub fn read_limited(path: &std::path::Path) -> MeshResult<Vec<u8>> {
 }
 
 impl Mesh {
+    #[cfg(test)]
     pub fn from_triangles(triangles: impl IntoIterator<Item = [[f32; 3]; 3]>) -> MeshResult<Self> {
         let mut mesh = Self::empty();
         mesh.bounds_min = Vec3::splat(f32::INFINITY);
         mesh.bounds_max = Vec3::splat(f32::NEG_INFINITY);
         for triangle in triangles {
-            if mesh.vertices.len().is_multiple_of(3072) {
-                check_cancelled()?;
-            }
-            if mesh.vertices.len() / 3 >= MAX_TRIANGLES {
-                return Err("Model exceeds triangle limit".into());
-            }
-            if !triangle.iter().flatten().all(|v| v.is_finite()) {
-                return Err("Non-finite vertex coordinate".into());
-            }
-            let [a, b, c] =
-                triangle.map(|p| glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64));
-            let normal = (b - a)
-                .cross(c - a)
-                .normalize_or_zero()
-                .as_vec3()
-                .to_array();
-            for position in triangle {
-                let p = Vec3::from(position);
-                mesh.bounds_min = mesh.bounds_min.min(p);
-                mesh.bounds_max = mesh.bounds_max.max(p);
-                mesh.vertices.push(Vertex { position, normal });
-            }
+            mesh.push_triangle(triangle)?;
         }
-        if mesh.vertices.is_empty() {
+        mesh.finish()
+    }
+
+    pub(crate) fn triangle_builder(capacity: usize) -> Self {
+        Self {
+            vertices: std::sync::Arc::new(Vec::with_capacity(capacity.min(MAX_TRIANGLES) * 3)),
+            bounds_min: Vec3::splat(f32::INFINITY),
+            bounds_max: Vec3::splat(f32::NEG_INFINITY),
+        }
+    }
+
+    pub(crate) fn push_triangle(&mut self, triangle: [[f32; 3]; 3]) -> MeshResult<()> {
+        if self.vertices.len().is_multiple_of(3072) {
+            check_cancelled()?;
+        }
+        if self.vertices.len() / 3 >= MAX_TRIANGLES {
+            return Err("Model exceeds triangle limit".into());
+        }
+        if !triangle.iter().flatten().all(|v| v.is_finite()) {
+            return Err("Non-finite vertex coordinate".into());
+        }
+        let [a, b, c] = triangle.map(|p| glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64));
+        let normal = (b - a)
+            .cross(c - a)
+            .normalize_or_zero()
+            .as_vec3()
+            .to_array();
+        for position in triangle {
+            let p = Vec3::from(position);
+            self.bounds_min = self.bounds_min.min(p);
+            self.bounds_max = self.bounds_max.max(p);
+            std::sync::Arc::make_mut(&mut self.vertices).push(Vertex { position, normal });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn finish(self) -> MeshResult<Self> {
+        if self.vertices.is_empty() {
             return Err("Model contains no triangles".into());
         }
-        if !mesh.extent().is_finite() || !mesh.center().is_finite() {
+        if !self.extent().is_finite() || !self.center().is_finite() {
             return Err("Model coordinates exceed supported range".into());
         }
-        Ok(mesh)
+        Ok(self)
     }
 }
 
@@ -142,4 +159,17 @@ mod tests {
             Mesh::from_triangles([[[0.0, 0.0, 0.0], [1e15, 0.0, 0.0], [0.0, 1e15, 0.0]]]).unwrap();
         assert_eq!(mesh.vertices[0].normal, [0.0, 0.0, 1.0]);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn clones_share_storage_and_mutations_preserve_original() {
+    let original =
+        Mesh::from_triangles([[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]]).unwrap();
+    let mut copy = original.clone();
+    assert!(std::sync::Arc::ptr_eq(&original.vertices, &copy.vertices));
+    copy.push_triangle([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        .unwrap();
+    assert_eq!(original.vertices.len(), 3);
+    assert_eq!(copy.vertices.len(), 6);
 }

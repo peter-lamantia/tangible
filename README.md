@@ -2,7 +2,7 @@
 
 # Tangible
 
-A simple, cross-platform STL, OBJ, and 3MF file viewer written in Rust.
+A simple, cross-platform STL, OBJ, 3MF, OFF, PLY, glTF, and GLB file viewer written in Rust.
 
 ![Tangible UI](/assets/tangible-ui.png)
 
@@ -11,7 +11,7 @@ A simple, cross-platform STL, OBJ, and 3MF file viewer written in Rust.
 - **Cross-platform** — runs natively on Windows, macOS, and Linux
 - **GUI File Opening** — native file dialog (`rfd`), top bar button, and drag-and-drop
 - **GPU-accelerated** — uses `wgpu` (Vulkan / Metal / DX12)
-- **STL, OBJ & 3MF** — binary and ASCII STL, polygonal OBJ, and zipped 3MF models
+- **STL, OBJ, 3MF, OFF, PLY, glTF & GLB** — triangle geometry from common 3D model formats. glTF/GLB import displays static scene geometry; materials, textures, animation, and skinning are not displayed.
 - **Antialiasing** — 4× MSAA enabled by default on supported GPUs
 - **3MF plate selection** — shaded square previews for all plates and each individual plate, with a resizable and collapsible panel
 - **Responsive loading** — background parsing and progressive plate previews; the most recently opened file takes priority
@@ -74,3 +74,9 @@ packages (on Debian/Ubuntu: `libwayland-dev libxkbcommon-dev libgtk-3-dev`).
 - `src/mesh.rs`: shared geometry and validation
 - `src/model.rs`, `src/model/obj.rs`, `src/model/three_mf.rs`, and `src/stl.rs`: format loading
 - `src/ui.rs` and `src/theme.rs`: UI helpers and styling
+
+Model loaders build render geometry directly to reduce temporary memory use. PLY streams records from disk; glTF/GLB loads geometry buffers without decoding unused textures. Large meshes still require CPU geometry and GPU storage.
+
+Models support up to 10 million expanded triangles. Large models are uploaded in GPU buffer chunks; memory use still scales with triangle count.
+
+Large-model performance: mesh copies share immutable vertex storage. The renderer uses indexed geometry when it reduces upload size and caches up to two recently viewed meshes of at most 32 MiB each. Plate thumbnails retain four-sample antialiasing with incremental rasterization. Release builds enable thin LTO.

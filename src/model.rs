@@ -1,4 +1,7 @@
+mod gltf;
 mod obj;
+mod off;
+mod ply;
 mod three_mf;
 use crate::{
     mesh::{read_limited, Mesh},
@@ -47,8 +50,14 @@ pub fn load_model(path: impl AsRef<Path>) -> Result<Mesh> {
         .as_deref()
     {
         Some("stl") => stl::load_stl(path),
+        Some("ply") => ply::load(path),
+        Some("gltf" | "glb") => gltf::load(path),
+        Some("off") => off::parse_off(std::str::from_utf8(&read_limited(path)?)?),
         Some("obj") => parse_obj(std::str::from_utf8(&read_limited(path)?)?),
         Some("3mf") => Ok(load_3mf_document(path)?.mesh),
-        _ => Err("Unsupported model format (expected .stl, .obj, or .3mf)".into()),
+        _ => Err(
+            "Unsupported model format (expected .stl, .obj, .3mf, .off, .ply, .gltf, or .glb)"
+                .into(),
+        ),
     }
 }

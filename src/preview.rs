@@ -91,16 +91,26 @@ pub(crate) fn plate_preview(
             (0.75 * intensity * 255.0).clamp(0.0, 255.0) as u8,
             (0.8 * intensity * 255.0).clamp(0.0, 255.0) as u8,
         );
+        let inverse_area = area.recip();
         for y in y_min..=y_max {
             if !current() {
                 return None;
             }
+            let mut weights = SAMPLES.map(|(dx, dy)| {
+                let px = x_min as f32 + dx;
+                let py = y as f32 + dy;
+                [
+                    edge(screen[1], screen[2], px, py) * inverse_area,
+                    edge(screen[2], screen[0], px, py) * inverse_area,
+                ]
+            });
+            let step0 = (screen[2][1] - screen[1][1]) * inverse_area;
+            let step1 = (screen[0][1] - screen[2][1]) * inverse_area;
             for x in x_min..=x_max {
-                for (sample, (dx, dy)) in SAMPLES.iter().enumerate() {
-                    let px = x as f32 + dx;
-                    let py = y as f32 + dy;
-                    let w0 = edge(screen[1], screen[2], px, py) / area;
-                    let w1 = edge(screen[2], screen[0], px, py) / area;
+                for (sample, weight) in weights.iter_mut().enumerate() {
+                    let [w0, w1] = *weight;
+                    weight[0] += step0;
+                    weight[1] += step1;
                     let w2 = 1.0 - w0 - w1;
                     if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
                         continue;
@@ -153,7 +163,8 @@ fn plate_preview_renders_geometry() {
                 position: [0.0, 1.0, 0.0],
                 normal: [0.0, 0.0, 1.0],
             },
-        ],
+        ]
+        .into(),
         bounds_min: glam::Vec3::new(-1.0, -1.0, 0.0),
         bounds_max: glam::Vec3::new(1.0, 1.0, 0.0),
     };

@@ -5,9 +5,6 @@ use quick_xml::{
     Reader,
 };
 use std::{collections::HashMap, io::Read, path::Path};
-fn mesh_from_triangles(triangles: impl IntoIterator<Item = [[f32; 3]; 3]>) -> Result<Mesh> {
-    Mesh::from_triangles(triangles)
-}
 
 fn attr(element: &BytesStart<'_>, name: &[u8]) -> Result<Option<String>> {
     for attribute in element.attributes() {
@@ -243,7 +240,7 @@ fn collect_object(
     id: &str,
     transform: &Transform,
     budget: &mut Expansion,
-    triangles: &mut Vec<[[f32; 3]; 3]>,
+    triangles: &mut Mesh,
 ) -> Result<()> {
     let key = (path.to_owned(), id.to_owned());
     budget.visits += 1;
@@ -262,7 +259,7 @@ fn collect_object(
         .ok_or_else(|| format!("3MF object {id} missing in {path}"))?;
     budget.active.push(key);
     for face in &object.faces {
-        if triangles.len().is_multiple_of(1024) {
+        if (triangles.vertices.len() / 3).is_multiple_of(1024) {
             crate::mesh::check_cancelled()?;
         }
         let mut triangle = [[0.0; 3]; 3];
@@ -275,10 +272,10 @@ fn collect_object(
                     .ok_or("3MF triangle index out of range")?,
             );
         }
-        if triangles.len() >= MAX_TRIANGLES {
+        if (triangles.vertices.len() / 3) >= MAX_TRIANGLES {
             return Err("3MF exceeds expanded triangle limit".into());
         }
-        triangles.push(triangle);
+        triangles.push_triangle(triangle)?;
     }
     for component in &object.components {
         crate::mesh::check_cancelled()?;
@@ -299,7 +296,7 @@ fn collect_object(
 
 fn assemble_3mf(models: &HashMap<String, Model>, root: &str) -> Result<Mesh> {
     let model = models.get(root).ok_or("3MF root model missing")?;
-    let mut triangles = Vec::new();
+    let mut triangles = Mesh::triangle_builder(0);
     let mut budget = Expansion::default();
     for item in &model.items {
         let (path, transform) = reference_transform(models, root, item)?;
@@ -312,7 +309,7 @@ fn assemble_3mf(models: &HashMap<String, Model>, root: &str) -> Result<Mesh> {
             &mut triangles,
         )?;
     }
-    mesh_from_triangles(triangles)
+    triangles.finish()
 }
 
 const MAX_XML_BYTES: u64 = 256 * 1024 * 1024;
@@ -528,7 +525,7 @@ fn parse_plates(xml: &str, models: &HashMap<String, Model>, root: &str) -> Resul
     let mut total_triangles = 0;
     for spec in specs {
         crate::mesh::check_cancelled()?;
-        let mut triangles = Vec::new();
+        let mut triangles = Mesh::triangle_builder(0);
         for (id, instance) in spec.instances {
             let item = root_model
                 .items
@@ -548,16 +545,16 @@ fn parse_plates(xml: &str, models: &HashMap<String, Model>, root: &str) -> Resul
                 &mut triangles,
             )?;
         }
-        total_triangles += triangles.len();
+        total_triangles += triangles.vertices.len() / 3;
         if total_triangles > MAX_TRIANGLES {
             return Err("3MF plates exceed expanded triangle limit".into());
         }
         plates.push(Plate {
             name: spec.name,
-            mesh: if triangles.is_empty() {
+            mesh: if triangles.vertices.is_empty() {
                 Mesh::empty()
             } else {
-                mesh_from_triangles(triangles)?
+                triangles.finish()?
             },
         });
     }
@@ -616,7 +613,7 @@ mod tests {
             "1",
             &IDENTITY,
             &mut budget,
-            &mut Vec::new(),
+            &mut Mesh::triangle_builder(0),
         )
         .unwrap_err();
         assert!(error.to_string().contains("limit"));

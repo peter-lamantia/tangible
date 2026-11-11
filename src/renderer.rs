@@ -18,13 +18,21 @@ struct Uniforms {
     edges: f32,
 }
 
+struct GeometryChunk {
+    vertices: wgpu::Buffer,
+    indices: Option<wgpu::Buffer>,
+    count: u32,
+}
+
 pub(crate) struct GpuState {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     pub(crate) config: wgpu::SurfaceConfiguration,
     pipeline: wgpu::RenderPipeline,
-    vertex_buffer: wgpu::Buffer,
+    vertex_buffers: Vec<GeometryChunk>,
+    mesh_storage: Arc<Vec<mesh::Vertex>>,
+    geometry_cache: std::collections::VecDeque<(Arc<Vec<mesh::Vertex>>, Vec<GeometryChunk>)>,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
@@ -112,7 +120,7 @@ impl GpuState {
         });
 
         // ── Buffers ──────────────────────────────────────────────────────
-        let vertex_buffer = Self::create_vertex_buffer(&device, mesh);
+        let vertex_buffers = Self::create_vertex_buffers(&device, mesh);
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Uniform Buffer"),
@@ -159,7 +167,9 @@ impl GpuState {
             queue,
             config,
             pipeline,
-            vertex_buffer,
+            vertex_buffers,
+            mesh_storage: mesh.vertices.clone(),
+            geometry_cache: Default::default(),
             uniform_buffer,
             bind_group,
             depth_view,
@@ -244,28 +254,60 @@ impl GpuState {
         })
     }
 
-    fn create_vertex_buffer(device: &wgpu::Device, mesh: &mesh::Mesh) -> wgpu::Buffer {
-        if mesh.vertices.is_empty() {
-            let dummy = mesh::Vertex {
-                position: [0.0; 3],
-                normal: [0.0; 3],
-            };
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Vertex Buffer (Dummy)"),
-                contents: bytemuck::cast_slice(&[dummy]),
-                usage: wgpu::BufferUsages::VERTEX,
+    fn create_vertex_buffers(device: &wgpu::Device, mesh: &mesh::Mesh) -> Vec<GeometryChunk> {
+        // Bound temporary deduplication memory as well as device buffer sizes.
+        let chunk_size = vertex_chunk_size(device.limits().max_buffer_size).min(196_608);
+        mesh.vertices
+            .chunks(chunk_size)
+            .map(|vertices| {
+                let (unique, indices) = indexed_vertices(vertices);
+                let indexed = unique.len() * std::mem::size_of::<mesh::Vertex>()
+                    + indices.len() * 4
+                    < std::mem::size_of_val(vertices);
+                let data = if indexed { unique.as_slice() } else { vertices };
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Model vertices"),
+                    contents: bytemuck::cast_slice(data),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                let index_buffer = indexed.then(|| {
+                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Model indices"),
+                        contents: bytemuck::cast_slice(&indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    })
+                });
+                GeometryChunk {
+                    vertices: buffer,
+                    indices: index_buffer,
+                    count: vertices.len() as u32,
+                }
             })
-        } else {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Vertex Buffer"),
-                contents: bytemuck::cast_slice(&mesh.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            })
-        }
+            .collect()
     }
 
     pub(crate) fn load_mesh(&mut self, mesh: &mesh::Mesh) {
-        self.vertex_buffer = Self::create_vertex_buffer(&self.device, mesh);
+        if Arc::ptr_eq(&self.mesh_storage, &mesh.vertices) {
+            return;
+        }
+        let cached = self
+            .geometry_cache
+            .iter()
+            .position(|(storage, _)| Arc::ptr_eq(storage, &mesh.vertices))
+            .and_then(|i| self.geometry_cache.remove(i));
+        let previous = std::mem::take(&mut self.vertex_buffers);
+        // Retain at most two small meshes; large models release their GPU storage immediately.
+        if self.mesh_storage.len() * std::mem::size_of::<mesh::Vertex>() <= 32 * 1024 * 1024 {
+            self.geometry_cache
+                .push_back((self.mesh_storage.clone(), previous));
+        }
+        while self.geometry_cache.len() > 2 {
+            self.geometry_cache.pop_front();
+        }
+        self.vertex_buffers = cached
+            .map(|(_, buffers)| buffers)
+            .unwrap_or_else(|| Self::create_vertex_buffers(&self.device, mesh));
+        self.mesh_storage = mesh.vertices.clone();
         self.num_vertices = mesh.vertices.len() as u32;
     }
 
@@ -466,8 +508,15 @@ impl GpuState {
                 pass.set_scissor_rect(left, 0, width, self.config.height);
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
-                pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-                pass.draw(0..self.num_vertices, 0..1);
+                for chunk in &self.vertex_buffers {
+                    pass.set_vertex_buffer(0, chunk.vertices.slice(..));
+                    if let Some(indices) = &chunk.indices {
+                        pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..chunk.count, 0, 0..1);
+                    } else {
+                        pass.draw(0..chunk.count, 0..1);
+                    }
+                }
             }
         }
 
@@ -497,6 +546,74 @@ impl GpuState {
 
         for id in &textures_delta.free {
             self.egui_renderer.free_texture(id);
+        }
+    }
+}
+
+// Cap individual uploads at 64 MiB even on devices supporting larger buffers.
+fn indexed_vertices(vertices: &[mesh::Vertex]) -> (Vec<mesh::Vertex>, Vec<u32>) {
+    let mut lookup = std::collections::HashMap::new();
+    let mut unique = Vec::new();
+    let mut indices = Vec::with_capacity(vertices.len());
+    for (i, vertex) in vertices.iter().enumerate() {
+        let key = (
+            vertex.position.map(f32::to_bits),
+            vertex.normal.map(f32::to_bits),
+            i % 3,
+        );
+        let index = *lookup.entry(key).or_insert_with(|| {
+            // Keep index % 3 equal to the triangle corner for shader barycentrics.
+            while unique.len() % 3 != i % 3 {
+                unique.push(*vertex);
+            }
+            let index = unique.len() as u32;
+            unique.push(*vertex);
+            index
+        });
+        indices.push(index);
+    }
+    (unique, indices)
+}
+
+#[cfg(test)]
+#[test]
+fn indexed_geometry_preserves_vertices_and_edge_corners() {
+    let a = mesh::Vertex {
+        position: [1.0, 2.0, 3.0],
+        normal: [0.0, 0.0, 1.0],
+    };
+    let b = mesh::Vertex {
+        position: [2.0, 3.0, 4.0],
+        ..a
+    };
+    let source = [a, b, a, b, a, b, a, b, a];
+    let (unique, indices) = indexed_vertices(&source);
+    for (corner, (&index, vertex)) in indices.iter().zip(&source).enumerate() {
+        assert_eq!(index as usize % 3, corner % 3);
+        assert_eq!(unique[index as usize].position, vertex.position);
+        assert_eq!(unique[index as usize].normal, vertex.normal);
+    }
+    assert_eq!(&indices[..3], &indices[6..]);
+}
+
+fn vertex_chunk_size(max_buffer_size: u64) -> usize {
+    (max_buffer_size.min(64 * 1024 * 1024) / (std::mem::size_of::<mesh::Vertex>() as u64 * 3))
+        as usize
+        * 3
+}
+
+#[cfg(test)]
+mod buffer_tests {
+    use super::*;
+    #[test]
+    fn large_mesh_chunks_preserve_triangles_and_device_limits() {
+        for limit in [256 * 1024 * 1024, 32 * 1024 * 1024] {
+            let count = vertex_chunk_size(limit);
+            assert_eq!(count % 3, 0);
+            assert!(count * std::mem::size_of::<mesh::Vertex>() <= limit as usize);
+            let triangles = 9_994_566usize;
+            let chunks = (triangles * 3).div_ceil(count);
+            assert!(chunks > 1);
         }
     }
 }
