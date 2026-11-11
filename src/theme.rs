@@ -501,11 +501,29 @@ pub fn radix_badge(ui: &mut egui::Ui, icon: Option<Icon>, text: &str) {
 /// Radix Segmented Theme Selector: [ Monitor System | Sun Light | Moon Dark ]
 pub fn theme_segmented_control(ui: &mut egui::Ui, current: &mut ThemePreference) -> bool {
     let options = [
-        (ThemePreference::System, Icon::Monitor, "System"),
-        (ThemePreference::Light, Icon::Sun, "Light"),
-        (ThemePreference::Dark, Icon::Moon, "Dark"),
+        (ThemePreference::System, Some(Icon::Monitor), "System"),
+        (ThemePreference::Light, Some(Icon::Sun), "Light"),
+        (ThemePreference::Dark, Some(Icon::Moon), "Dark"),
     ];
 
+    segmented_control(ui, "theme", current, &options)
+}
+
+pub fn projection_segmented_control(ui: &mut egui::Ui, orthographic: &mut bool) -> bool {
+    segmented_control(
+        ui,
+        "projection",
+        orthographic,
+        &[(false, None, "Perspective"), (true, None, "Orthographic")],
+    )
+}
+
+fn segmented_control<T: Copy + PartialEq>(
+    ui: &mut egui::Ui,
+    id_source: &str,
+    current: &mut T,
+    options: &[(T, Option<Icon>, &str)],
+) -> bool {
     let is_dark = ui.visuals().dark_mode;
     let container_bg = if is_dark {
         egui::Color32::from_rgb(22, 23, 27)
@@ -526,11 +544,11 @@ pub fn theme_segmented_control(ui: &mut egui::Ui, current: &mut ThemePreference)
     let item_spacing = 2.0;
 
     // Pre-layout text and compute widths
-    let mut item_widths = Vec::with_capacity(3);
+    let mut item_widths = Vec::with_capacity(options.len());
     let mut max_content_h: f32 = icon_size;
-    let mut galleys = Vec::with_capacity(3);
+    let mut galleys = Vec::with_capacity(options.len());
 
-    for (pref, _, label) in &options {
+    for (pref, icon, label) in options {
         let is_active = *current == *pref;
         let text_color = if is_active {
             if is_dark {
@@ -548,7 +566,12 @@ pub fn theme_segmented_control(ui: &mut egui::Ui, current: &mut ThemePreference)
             .painter()
             .layout_no_wrap((*label).to_owned(), font_id.clone(), text_color);
         max_content_h = max_content_h.max(galley.size().y);
-        let item_w = icon_size + icon_gap + galley.size().x + padding.x * 2.0;
+        let icon_width = if icon.is_some() {
+            icon_size + icon_gap
+        } else {
+            0.0
+        };
+        let item_w = icon_width + galley.size().x + padding.x * 2.0;
         item_widths.push(item_w);
         galleys.push(galley);
     }
@@ -583,7 +606,7 @@ pub fn theme_segmented_control(ui: &mut egui::Ui, current: &mut ThemePreference)
             let item_rect =
                 egui::Rect::from_min_size(egui::pos2(cur_x, cur_y), egui::vec2(item_w, item_h));
 
-            let id = ui.id().with("theme_seg_btn").with(idx);
+            let id = ui.id().with(id_source).with(idx);
             let resp = ui.interact(item_rect, id, egui::Sense::click());
             let is_active = *current == *pref;
             let hovered = resp.hovered();
@@ -639,14 +662,18 @@ pub fn theme_segmented_control(ui: &mut egui::Ui, current: &mut ThemePreference)
                 egui::pos2(start_x + icon_size * 0.5, center_y),
                 egui::vec2(icon_size, icon_size),
             );
-            draw_icon(ui.painter(), icon_rect, *icon, text_color);
+            if let Some(icon) = icon {
+                draw_icon(ui.painter(), icon_rect, *icon, text_color);
+            }
+            let icon_width = if icon.is_some() {
+                icon_size + icon_gap
+            } else {
+                0.0
+            };
 
             let galley = galleys[idx].clone();
             ui.painter().galley(
-                egui::pos2(
-                    start_x + icon_size + icon_gap,
-                    center_y - galley.size().y * 0.5,
-                ),
+                egui::pos2(start_x + icon_width, center_y - galley.size().y * 0.5),
                 galley,
                 text_color,
             );

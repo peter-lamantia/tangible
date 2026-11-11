@@ -25,7 +25,7 @@ fn parse_binary_stl(data: &[u8]) -> MeshResult<Mesh> {
     }
     let mut mesh = Mesh::triangle_builder(count);
     for record in data[84..].as_chunks::<50>().0 {
-        if mesh.vertices.len() / 3 % 1024 == 0 {
+        if (mesh.vertices.len() / 3).is_multiple_of(1024) {
             crate::mesh::check_cancelled()?;
         }
         let mut triangle = [[0.0; 3]; 3];
@@ -118,6 +118,14 @@ fn parse_ascii_stl(data: &[u8]) -> MeshResult<Mesh> {
     mesh.finish()
 }
 
+fn parse_vector<'a>(fields: &mut impl Iterator<Item = &'a str>) -> MeshResult<[f32; 3]> {
+    let mut values = [0.0; 3];
+    for value in &mut values {
+        *value = fields.next().ok_or("Missing coordinate")?.parse()?;
+    }
+    Ok(values)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -170,12 +178,4 @@ mod tests {
         assert_eq!(mesh.bounds_max, Vec3::new(1.0, 1.0, 1.0));
         assert_eq!(mesh.center(), Vec3::new(0.5, 0.5, 0.5));
     }
-}
-
-fn parse_vector<'a>(fields: &mut impl Iterator<Item = &'a str>) -> MeshResult<[f32; 3]> {
-    let mut values = [0.0; 3];
-    for value in &mut values {
-        *value = fields.next().ok_or("Missing coordinate")?.parse()?;
-    }
-    Ok(values)
 }

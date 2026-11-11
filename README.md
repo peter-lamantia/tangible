@@ -16,10 +16,13 @@ A simple, cross-platform STL, OBJ, 3MF, OFF, PLY, glTF, and GLB file viewer writ
 - **3MF plate selection** — shaded square previews for all plates and each individual plate, with a resizable and collapsible panel
 - **Responsive loading** — background parsing and progressive plate previews; the most recently opened file takes priority
 - **Model details** — displays filename, triangle/vertex counts, and bounding box dimensions
+- **Projection toggle** — switch between Perspective and Orthographic using the segmented control beside the theme selector
 
 ## Usage
 
 You can launch the viewer with or without a file:
+
+The welcome-screen cube starts at rest; click or drag it to interact with it.
 
 ```bash
 # Launch GUI directly (open files via button, dialog, or drag-and-drop)
@@ -80,3 +83,19 @@ Model loaders build render geometry directly to reduce temporary memory use. PLY
 Models support up to 10 million expanded triangles. Large models are uploaded in GPU buffer chunks; memory use still scales with triangle count.
 
 Large-model performance: mesh copies share immutable vertex storage. The renderer uses indexed geometry when it reduces upload size and caches up to two recently viewed meshes of at most 32 MiB each. Plate thumbnails retain four-sample antialiasing with incremental rasterization. Release builds enable thin LTO.
+
+## glTF regression tests
+
+The loader tests use a small, pinned subset of
+[Khronos glTF Sample Assets](https://github.com/KhronosGroup/glTF-Sample-Assets).
+Run `cargo test --locked --all-targets` to check external and embedded buffers,
+GLB, non-indexed geometry, interleaved attributes, and sparse accessors offline.
+Fixture provenance, licenses, and coverage are in
+[tests/fixtures/gltf-sample-assets/README.md](tests/fixtures/gltf-sample-assets/README.md).
+These checks cover static geometry import; they do not test material or animation rendering.
+
+When opening `.gltf` files, keep companion buffers (such as `.bin` files) in
+their original relative locations. Missing-buffer errors identify the resource
+and its base directory. Use the `.glb` variant for a bundled model file.
+Load errors appear in a scrollable popup at the bottom right, with buttons to
+copy the full message or dismiss it.

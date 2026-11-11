@@ -93,7 +93,7 @@ fn main() {
     let mut all_preview: Option<egui::TextureHandle> = None;
     let mut selected_plate: Option<usize> = None;
     let mut plates_collapsed = false;
-    let mut cube_offset = egui::vec2(0.0, -600.0);
+    let mut cube_offset = egui::Vec2::ZERO;
     let mut cube_velocity = egui::Vec2::ZERO;
     let mut cube_last_time = std::time::Instant::now();
     let mut cube_dragged = false;
@@ -342,7 +342,7 @@ fn main() {
                                                 ) {
                                                     should_update_theme = true;
                                                 }
-                                                ui.checkbox(&mut camera.orthographic, "Orthographic");
+                                                theme::projection_segmented_control(ui, &mut camera.orthographic);
                                                 ui.checkbox(&mut gpu.show_edges, "Edges").on_hover_text("Show triangle edges on the shaded model");
                                                 if gpu.msaa_supported {
                                                     ui.add_space(10.0);
@@ -460,28 +460,22 @@ fn main() {
                                                         "{} triangles", format_number(info.num_triangles)
                                                     )).small().color(color));
                                                 }
-                                                if let Some(err) = &error_message {
-                                                    ui.add_space(12.0);
-                                                    if theme::radix_button(ui, Some(theme::Icon::Close), "")
-                                                        .on_hover_text("Dismiss error").clicked() {
-                                                        should_clear_error = true;
-                                                    }
-                                                    ui.colored_label(
-                                                        if is_dark { egui::Color32::from_rgb(248, 113, 113) }
-                                                        else { egui::Color32::from_rgb(220, 38, 38) },
-                                                        format!("⚠ {err}"),
-                                                    );
-                                                }
+
                                             },
                                         );
                                     });
                                 });
 
-                            if file_info.is_some() {
+                            if let Some(error) = &error_message {
+                                should_clear_error |= ui::error_popup(ctx, error, bottom_panel.response.rect.height());
+                            }
+
+                            if file_info.is_some() && error_message.is_none() {
                                 ui::orientation_axes(ctx, &mut camera, bottom_panel.response.rect.height());
                             }
 
                             if file_info.is_some()
+                                && error_message.is_none()
                                 && ui::reset_view_button(ctx, bottom_panel.response.rect.height())
                             {
                                 should_reset_camera = true;

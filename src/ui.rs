@@ -1,3 +1,43 @@
+/// Returns true when the user dismisses the error.
+pub(crate) fn error_popup(ctx: &egui::Context, message: &str, bottom_height: f32) -> bool {
+    let screen = ctx.screen_rect();
+    let width = (screen.width() - 56.0).clamp(1.0, 420.0);
+    let max_text_height = (screen.height() - bottom_height - 110.0).clamp(1.0, 240.0);
+    let mut dismissed = false;
+    egui::Area::new(egui::Id::new("load_error_popup"))
+        .order(egui::Order::Foreground)
+        .movable(false)
+        .anchor(
+            egui::Align2::RIGHT_BOTTOM,
+            egui::vec2(-16.0, -bottom_height - 16.0),
+        )
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(width);
+                ui.horizontal(|ui| {
+                    ui.colored_label(ui.visuals().error_fg_color, "Load error");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        dismissed =
+                            crate::theme::radix_button(ui, Some(crate::theme::Icon::Close), "")
+                                .on_hover_text("Dismiss error")
+                                .clicked();
+                        if ui.button("Copy").on_hover_text("Copy full error").clicked() {
+                            ui.output_mut(|output| output.copied_text = message.to_owned());
+                        }
+                    });
+                });
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .id_source(("load_error_text", message))
+                    .max_height(max_text_height)
+                    .show(ui, |ui| {
+                        ui.add(egui::Label::new(message).wrap());
+                    });
+            });
+        });
+    dismissed
+}
+
 pub(crate) fn format_number(n: usize) -> String {
     let s = n.to_string();
     let mut result = String::new();

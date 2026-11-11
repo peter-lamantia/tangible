@@ -8,7 +8,36 @@ pub(super) fn load(path: &Path) -> Result<Mesh> {
     // into large pixel buffers that are immediately discarded.
     let source = gltf::Gltf::from_slice(&crate::mesh::read_limited(path)?)?;
     let doc = source.document;
-    let buffers = gltf::import_buffers(&doc, path.parent(), source.blob)?;
+    let mut blob = source.blob;
+    let mut buffers = Vec::new();
+    for buffer in doc.buffers() {
+        let data = gltf::buffer::Data::from_source_and_blob(
+            buffer.source(),
+            path.parent(),
+            &mut blob,
+        )
+        .map_err(|error| match buffer.source() {
+            gltf::buffer::Source::Uri(uri) if !uri.starts_with("data:") => {
+                let hint = if matches!(&error, gltf::Error::Io(e) if e.kind() == std::io::ErrorKind::NotFound) {
+                    " Keep the .gltf file and its companion files together, preserving their relative paths, or open the .glb version instead."
+                } else {
+                    ""
+                };
+                format!("Could not load glTF buffer {uri:?} relative to {}: {error}.{hint}", path.parent().unwrap_or(Path::new(".")).display())
+            }
+            _ => format!("Could not load glTF buffer {}: {error}", buffer.index()),
+        })?;
+        // Preserve the validation performed by gltf::import_buffers.
+        if data.len() < buffer.length() {
+            return Err(gltf::Error::BufferLength {
+                buffer: buffer.index(),
+                expected: buffer.length(),
+                actual: data.len(),
+            }
+            .into());
+        }
+        buffers.push(data);
+    }
     let scene = doc
         .default_scene()
         .or_else(|| doc.scenes().next())
@@ -44,10 +73,10 @@ pub(super) fn load(path: &Path) -> Result<Mesh> {
                 };
                 match primitive.mode() {
                     gltf::mesh::Mode::Triangles => {
-                        if indices.len() % 3 != 0 {
+                        if !indices.len().is_multiple_of(3) {
                             return Err("Invalid glTF triangle count".into());
                         }
-                        for c in indices.chunks_exact(3) {
+                        for c in indices.as_chunks::<3>().0 {
                             push(c[0], c[1], c[2])?;
                         }
                     }
@@ -76,6 +105,88 @@ pub(super) fn load(path: &Path) -> Result<Mesh> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_companion_buffer_names_resource_and_recovery() {
+        let dir =
+            std::env::temp_dir().join(format!("tangible-gltf-missing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Box.gltf");
+        std::fs::write(
+            &path,
+            include_bytes!("../../tests/fixtures/gltf-sample-assets/Box/glTF/Box.gltf"),
+        )
+        .unwrap();
+        let error = crate::model::load_model(&path).unwrap_err().to_string();
+        assert!(error.contains("Box0.bin"), "{error}");
+        assert!(error.contains(&dir.display().to_string()), "{error}");
+        assert!(error.contains("companion files together"), "{error}");
+        assert!(error.contains(".glb"), "{error}");
+        // A truncated companion must still fail the buffer length validation.
+        std::fs::write(dir.join("Box0.bin"), [0u8; 4]).unwrap();
+        let error = load(&path).unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<gltf::Error>(),
+            Some(gltf::Error::BufferLength { .. })
+        ));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn imports_khronos_sample_assets() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gltf-sample-assets");
+        let cases = [
+            ("Triangle/glTF/Triangle.gltf", 1, [0.; 3], [1., 1., 0.]),
+            (
+                "Triangle/glTF-Embedded/Triangle.gltf",
+                1,
+                [0.; 3],
+                [1., 1., 0.],
+            ),
+            (
+                "TriangleWithoutIndices/glTF/TriangleWithoutIndices.gltf",
+                1,
+                [0.; 3],
+                [1., 1., 0.],
+            ),
+            ("Box/glTF/Box.gltf", 12, [-0.5; 3], [0.5; 3]),
+            ("Box/glTF-Binary/Box.glb", 12, [-0.5; 3], [0.5; 3]),
+            (
+                "BoxInterleaved/glTF/BoxInterleaved.gltf",
+                12,
+                [-0.5; 3],
+                [0.5; 3],
+            ),
+            (
+                "SimpleSparseAccessor/glTF/SimpleSparseAccessor.gltf",
+                12,
+                [0.; 3],
+                [6., 4., 0.],
+            ),
+        ];
+        for (file, triangles, min, max) in cases {
+            // Exercise the same extension dispatch used when opening a model.
+            let mesh = crate::model::load_model(root.join(file))
+                .unwrap_or_else(|error| panic!("{file}: {error}"));
+            assert_eq!(mesh.vertices.len(), triangles * 3, "{file}");
+            assert!(
+                mesh.bounds_min.abs_diff_eq(Vec3::from_array(min), 1e-6),
+                "{file}: minimum bounds"
+            );
+            assert!(
+                mesh.bounds_max.abs_diff_eq(Vec3::from_array(max), 1e-6),
+                "{file}: maximum bounds"
+            );
+            for vertex in mesh.vertices.iter() {
+                assert!(Vec3::from_array(vertex.position).is_finite(), "{file}");
+                assert!(
+                    (Vec3::from_array(vertex.normal).length() - 1.).abs() < 1e-6,
+                    "{file}: unit normal"
+                );
+            }
+        }
+    }
+
     #[test]
     fn imports_transformed_external_buffer() {
         let dir = std::env::temp_dir().join(format!("tangible-gltf-{}", std::process::id()));
