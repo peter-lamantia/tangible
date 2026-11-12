@@ -1,0 +1,4 @@
+# Bundle the MSVC C runtime so Windows downloads do not require a separate
+# Visual C++ Redistributable installation (applies to both x86-64 and ARM64).
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "target-feature=+crt-static"]

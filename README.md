@@ -59,6 +59,11 @@ including Apple silicon. These additional architectures are built and tested in
 CI; GPU compatibility still depends on the device and its drivers.
 
 - **Windows:** Run the downloaded `.exe` file.
+  Windows MSVC builds statically link the Visual C++ runtime, so a separate
+  Visual C++ Redistributable installation is not required. If an older download
+  reports a missing `VCRUNTIME140.dll` or `MSVCP140.dll`, use a newer build or
+  install Microsoft's [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
+  for your executable's architecture. Graphics drivers are still required.
 - **macOS:** Open the `.dmg`, drag `Tangible.app` to Applications, and launch it.
   The app is not signed or notarized, so macOS may require approval in Privacy &
   Security.
