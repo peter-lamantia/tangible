@@ -1,4 +1,4 @@
-mod gltf;
+pub(crate) mod gltf;
 mod obj;
 mod off;
 mod ply;

@@ -22,6 +22,10 @@ struct GeometryChunk {
     vertices: wgpu::Buffer,
     indices: Option<wgpu::Buffer>,
     count: u32,
+    topology: usize,
+    texture: usize,
+    blend: bool,
+    center: glam::Vec3,
 }
 
 pub(crate) struct GpuState {
@@ -29,7 +33,11 @@ pub(crate) struct GpuState {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pub(crate) config: wgpu::SurfaceConfiguration,
-    pipeline: wgpu::RenderPipeline,
+    pipeline: Vec<wgpu::RenderPipeline>,
+    texture_layout: wgpu::BindGroupLayout,
+    textures: Vec<wgpu::BindGroup>,
+    animation: Option<Arc<crate::model::gltf::Scene>>,
+    animation_start: std::time::Instant,
     vertex_buffers: Vec<GeometryChunk>,
     mesh_storage: Arc<Vec<mesh::Vertex>>,
     geometry_cache: std::collections::VecDeque<(Arc<Vec<mesh::Vertex>>, Vec<GeometryChunk>)>,
@@ -153,9 +161,17 @@ impl GpuState {
             }],
         });
 
+        let texture_layout = Self::texture_bind_group_layout(&device);
+        let textures = Self::create_textures(&device, &queue, &texture_layout, mesh);
         let sample_count = 1;
-        let pipeline =
-            Self::create_pipeline(&device, &config, &shader, &bind_group_layout, sample_count);
+        let pipeline = Self::create_pipeline(
+            &device,
+            &config,
+            &shader,
+            &bind_group_layout,
+            &texture_layout,
+            sample_count,
+        );
         let depth_view = Self::create_depth_texture(&device, &config, sample_count);
         let msaa_view = None;
 
@@ -167,6 +183,10 @@ impl GpuState {
             queue,
             config,
             pipeline,
+            texture_layout,
+            textures,
+            animation: mesh.animation.clone(),
+            animation_start: std::time::Instant::now(),
             vertex_buffers,
             mesh_storage: mesh.vertices.clone(),
             geometry_cache: Default::default(),
@@ -189,77 +209,161 @@ impl GpuState {
         config: &wgpu::SurfaceConfiguration,
         shader: &wgpu::ShaderModule,
         bind_group_layout: &wgpu::BindGroupLayout,
+        texture_layout: &wgpu::BindGroupLayout,
         sample_count: u32,
-    ) -> wgpu::RenderPipeline {
+    ) -> Vec<wgpu::RenderPipeline> {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("Pipeline Layout"),
-            bind_group_layouts: &[bind_group_layout],
+            bind_group_layouts: &[bind_group_layout, texture_layout],
             push_constant_ranges: &[],
         });
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: shader,
-                entry_point: "vs_main",
-                buffers: &[wgpu::VertexBufferLayout {
-                    array_stride: std::mem::size_of::<mesh::Vertex>() as u64,
-                    step_mode: wgpu::VertexStepMode::Vertex,
-                    attributes: &[
-                        wgpu::VertexAttribute {
-                            offset: 0,
-                            shader_location: 0,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                        wgpu::VertexAttribute {
-                            offset: 12,
-                            shader_location: 1,
-                            format: wgpu::VertexFormat::Float32x3,
-                        },
-                    ],
-                }],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: shader,
-                entry_point: "fs_main",
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, // show both faces
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: sample_count,
-                ..Default::default()
-            },
-            multiview: None,
-        })
+        (0..12)
+            .map(|variant| {
+                let topology = [
+                    wgpu::PrimitiveTopology::TriangleList,
+                    wgpu::PrimitiveTopology::LineList,
+                    wgpu::PrimitiveTopology::PointList,
+                ][variant % 3];
+                let cull = variant / 3 % 2 != 0;
+                let blend = variant / 6 != 0;
+                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("Render Pipeline"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: shader,
+                        entry_point: "vs_main",
+                        buffers: &[wgpu::VertexBufferLayout {
+                            array_stride: std::mem::size_of::<mesh::Vertex>() as u64,
+                            step_mode: wgpu::VertexStepMode::Vertex,
+                            attributes: &[
+                                wgpu::VertexAttribute {
+                                    offset: 116,
+                                    shader_location: 11,
+                                    format: wgpu::VertexFormat::Float32x4,
+                                },
+                                wgpu::VertexAttribute {
+                                    offset: 76,
+                                    shader_location: 6,
+                                    format: wgpu::VertexFormat::Float32x2,
+                                },
+                                wgpu::VertexAttribute {
+                                    offset: 84,
+                                    shader_location: 7,
+                                    format: wgpu::VertexFormat::Float32x2,
+                                },
+                                wgpu::VertexAttribute {
+                                    offset: 92,
+                                    shader_location: 8,
+                                    format: wgpu::VertexFormat::Float32x2,
+                                },
+                                wgpu::VertexAttribute {
+                                    offset: 100,
+                                    shader_location: 9,
+                                    format: wgpu::VertexFormat::Float32x2,
+                                },
+                                wgpu::VertexAttribute {
+                                    offset: 108,
+                                    shader_location: 10,
+                                    format: wgpu::VertexFormat::Float32x2,
+                                },
+                                wgpu::VertexAttribute {
+                                    offset: 24,
+                                    shader_location: 2,
+                                    format: wgpu::VertexFormat::Float32x4,
+                                },
+                                wgpu::VertexAttribute {
+                                    offset: 40,
+                                    shader_location: 3,
+                                    format: wgpu::VertexFormat::Float32x2,
+                                },
+                                wgpu::VertexAttribute {
+                                    offset: 48,
+                                    shader_location: 4,
+                                    format: wgpu::VertexFormat::Float32x4,
+                                },
+                                wgpu::VertexAttribute {
+                                    offset: 64,
+                                    shader_location: 5,
+                                    format: wgpu::VertexFormat::Float32x3,
+                                },
+                                wgpu::VertexAttribute {
+                                    offset: 0,
+                                    shader_location: 0,
+                                    format: wgpu::VertexFormat::Float32x3,
+                                },
+                                wgpu::VertexAttribute {
+                                    offset: 12,
+                                    shader_location: 1,
+                                    format: wgpu::VertexFormat::Float32x3,
+                                },
+                            ],
+                        }],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: shader,
+                        entry_point: "fs_main",
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: config.format,
+                            blend: Some(if blend {
+                                wgpu::BlendState::ALPHA_BLENDING
+                            } else {
+                                wgpu::BlendState::REPLACE
+                            }),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: cull.then_some(wgpu::Face::Back),
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        unclipped_depth: false,
+                        conservative: false,
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: wgpu::TextureFormat::Depth32Float,
+                        depth_write_enabled: !blend,
+                        depth_compare: wgpu::CompareFunction::Less,
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: wgpu::MultisampleState {
+                        count: sample_count,
+                        ..Default::default()
+                    },
+                    multiview: None,
+                })
+            })
+            .collect()
     }
 
     fn create_vertex_buffers(device: &wgpu::Device, mesh: &mesh::Mesh) -> Vec<GeometryChunk> {
         // Bound temporary deduplication memory as well as device buffer sizes.
         let chunk_size = vertex_chunk_size(device.limits().max_buffer_size).min(196_608);
-        mesh.vertices
-            .chunks(chunk_size)
-            .map(|vertices| {
+        let batches = if mesh.batches.is_empty() {
+            vec![mesh::Batch {
+                range: 0..mesh.vertices.len(),
+                topology: 0,
+                texture: None,
+                maps: [None; 4],
+                double_sided: true,
+                blend: false,
+            }]
+        } else {
+            mesh.batches.clone()
+        };
+        batches
+            .iter()
+            .enumerate()
+            .flat_map(|(batch_index, batch)| {
+                mesh.vertices[batch.range.clone()]
+                    .chunks(chunk_size)
+                    .map(move |vertices| (batch_index, batch, vertices))
+            })
+            .map(|(batch_index, batch, vertices)| {
                 let (unique, indices) = indexed_vertices(vertices);
                 let indexed = unique.len() * std::mem::size_of::<mesh::Vertex>()
                     + indices.len() * 4
@@ -281,12 +385,22 @@ impl GpuState {
                     vertices: buffer,
                     indices: index_buffer,
                     count: vertices.len() as u32,
+                    topology: batch.topology as usize
+                        + usize::from(!batch.double_sided) * 3
+                        + usize::from(batch.blend) * 6,
+                    texture: batch_index,
+                    blend: batch.blend,
+                    center: vertices.iter().fold(glam::Vec3::ZERO, |sum, v| {
+                        sum + glam::Vec3::from_array(v.position) / vertices.len() as f32
+                    }),
                 }
             })
             .collect()
     }
 
     pub(crate) fn load_mesh(&mut self, mesh: &mesh::Mesh) {
+        self.animation = mesh.animation.clone();
+        self.animation_start = std::time::Instant::now();
         if Arc::ptr_eq(&self.mesh_storage, &mesh.vertices) {
             return;
         }
@@ -309,6 +423,170 @@ impl GpuState {
             .unwrap_or_else(|| Self::create_vertex_buffers(&self.device, mesh));
         self.mesh_storage = mesh.vertices.clone();
         self.num_vertices = mesh.vertices.len() as u32;
+        self.textures =
+            Self::create_textures(&self.device, &self.queue, &self.texture_layout, mesh);
+    }
+
+    fn texture_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+        let entries: Vec<_> = (0..10)
+            .map(|binding| wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: if binding % 2 == 0 {
+                    wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    }
+                } else {
+                    wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering)
+                },
+                count: None,
+            })
+            .collect();
+        device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Material texture layout"),
+            entries: &entries,
+        })
+    }
+
+    fn create_textures(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        mesh: &mesh::Mesh,
+    ) -> Vec<wgpu::BindGroup> {
+        let white = mesh::Texture {
+            width: 1,
+            height: 1,
+            pixels: vec![255; 4],
+            wrap: [1; 2],
+            linear: [true; 2],
+        };
+        let normal = mesh::Texture {
+            pixels: vec![128, 128, 255, 255],
+            ..white.clone()
+        };
+        // Upload each source once. Color maps use an sRGB view; data maps use linear views.
+        let uploaded: Vec<_> = [&white, &normal]
+            .into_iter()
+            .chain(mesh.textures.iter())
+            .map(|image| {
+                let size = wgpu::Extent3d {
+                    width: image.width,
+                    height: image.height,
+                    depth_or_array_layers: 1,
+                };
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Material texture"),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb],
+                });
+                queue.write_texture(
+                    texture.as_image_copy(),
+                    &image.pixels,
+                    wgpu::ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(image.width * 4),
+                        rows_per_image: Some(image.height),
+                    },
+                    size,
+                );
+                let address = |v| match v {
+                    0 => wgpu::AddressMode::ClampToEdge,
+                    2 => wgpu::AddressMode::MirrorRepeat,
+                    _ => wgpu::AddressMode::Repeat,
+                };
+                let filter = |linear| {
+                    if linear {
+                        wgpu::FilterMode::Linear
+                    } else {
+                        wgpu::FilterMode::Nearest
+                    }
+                };
+                let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                    address_mode_u: address(image.wrap[0]),
+                    address_mode_v: address(image.wrap[1]),
+                    mag_filter: filter(image.linear[0]),
+                    min_filter: filter(image.linear[1]),
+                    ..Default::default()
+                });
+                (texture, sampler)
+            })
+            .collect();
+        let maps: Vec<[Option<usize>; 5]> = if mesh.batches.is_empty() {
+            vec![[None; 5]]
+        } else {
+            mesh.batches
+                .iter()
+                .map(|b| [b.texture, b.maps[0], b.maps[1], b.maps[2], b.maps[3]])
+                .collect()
+        };
+        maps.iter()
+            .map(|maps| {
+                let indices: [usize; 5] = std::array::from_fn(|slot| {
+                    maps[slot].map_or(usize::from(slot == 2), |i| i + 2)
+                });
+                let views: Vec<_> = indices
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, &i)| {
+                        uploaded[i].0.create_view(&wgpu::TextureViewDescriptor {
+                            format: Some(if slot == 0 || slot == 4 {
+                                wgpu::TextureFormat::Rgba8UnormSrgb
+                            } else {
+                                wgpu::TextureFormat::Rgba8Unorm
+                            }),
+                            ..Default::default()
+                        })
+                    })
+                    .collect();
+                let entries: Vec<_> = (0..10)
+                    .map(|binding| wgpu::BindGroupEntry {
+                        binding,
+                        resource: if binding % 2 == 0 {
+                            wgpu::BindingResource::TextureView(&views[binding as usize / 2])
+                        } else {
+                            wgpu::BindingResource::Sampler(
+                                &uploaded[indices[binding as usize / 2]].1,
+                            )
+                        },
+                    })
+                    .collect();
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("Material maps"),
+                    layout,
+                    entries: &entries,
+                })
+            })
+            .collect()
+    }
+
+    fn ordered_chunks<'a>(
+        chunks: &'a [GeometryChunk],
+        camera: &camera::Camera,
+    ) -> Vec<&'a GeometryChunk> {
+        let forward = (camera.target - camera.eye()).normalize_or_zero();
+        let mut ordered: Vec<_> = chunks.iter().collect();
+        ordered.sort_by(|a, b| {
+            a.blend.cmp(&b.blend).then_with(|| {
+                if a.blend {
+                    b.center.dot(forward).total_cmp(&a.center.dot(forward))
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+        });
+        ordered
+    }
+
+    pub(crate) fn is_animated(&self) -> bool {
+        self.animation.is_some()
     }
 
     fn create_depth_texture(
@@ -366,6 +644,7 @@ impl GpuState {
             &self.config,
             &self.shader,
             &self.bind_group_layout,
+            &self.texture_layout,
             sample_count,
         );
         self.depth_view = Self::create_depth_texture(&self.device, &self.config, sample_count);
@@ -394,6 +673,18 @@ impl GpuState {
         scene_left: u32,
         is_dark: bool,
     ) {
+        if let Some(animation) = &self.animation {
+            match animation.evaluate(self.animation_start.elapsed().as_secs_f32()) {
+                Ok(mesh) => {
+                    self.vertex_buffers = Self::create_vertex_buffers(&self.device, &mesh);
+                    self.num_vertices = mesh.vertices.len() as u32;
+                }
+                Err(error) => {
+                    log::error!("Animation failed: {error}");
+                    self.animation = None;
+                }
+            }
+        }
         let output = match self.surface.get_current_texture() {
             Ok(t) => t,
             Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
@@ -506,9 +797,11 @@ impl GpuState {
                     1.0,
                 );
                 pass.set_scissor_rect(left, 0, width, self.config.height);
-                pass.set_pipeline(&self.pipeline);
+
                 pass.set_bind_group(0, &self.bind_group, &[]);
-                for chunk in &self.vertex_buffers {
+                for chunk in Self::ordered_chunks(&self.vertex_buffers, cam) {
+                    pass.set_pipeline(&self.pipeline[chunk.topology]);
+                    pass.set_bind_group(1, &self.textures[chunk.texture], &[]);
                     pass.set_vertex_buffer(0, chunk.vertices.slice(..));
                     if let Some(indices) = &chunk.indices {
                         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -559,6 +852,13 @@ fn indexed_vertices(vertices: &[mesh::Vertex]) -> (Vec<mesh::Vertex>, Vec<u32>) 
         let key = (
             vertex.position.map(f32::to_bits),
             vertex.normal.map(f32::to_bits),
+            vertex.color.map(f32::to_bits),
+            vertex.uv.map(f32::to_bits),
+            vertex.surface.map(f32::to_bits),
+            vertex.emissive.map(f32::to_bits),
+            vertex.map_uv.map(|uv| uv.map(f32::to_bits)),
+            vertex.map_factors.map(f32::to_bits),
+            vertex.tangent.map(f32::to_bits),
             i % 3,
         );
         let index = *lookup.entry(key).or_insert_with(|| {
@@ -581,6 +881,7 @@ fn indexed_geometry_preserves_vertices_and_edge_corners() {
     let a = mesh::Vertex {
         position: [1.0, 2.0, 3.0],
         normal: [0.0, 0.0, 1.0],
+        ..Default::default()
     };
     let b = mesh::Vertex {
         position: [2.0, 3.0, 4.0],
@@ -617,3 +918,58 @@ mod buffer_tests {
         }
     }
 }
+
+#[cfg(test)]
+#[test]
+fn material_shader_and_all_primitive_pipelines_validate() {
+    let instance = wgpu::Instance::default();
+    let Some(adapter) =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+    else {
+        return;
+    };
+    let (device, _) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
+            .unwrap();
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: None,
+        source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+    });
+    let uniforms = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    });
+    let textures = GpuState::texture_bind_group_layout(&device);
+    let config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        width: 32,
+        height: 32,
+        present_mode: wgpu::PresentMode::Fifo,
+        desired_maximum_frame_latency: 2,
+        alpha_mode: wgpu::CompositeAlphaMode::Auto,
+        view_formats: vec![],
+    };
+    for samples in [1, 4] {
+        assert_eq!(
+            GpuState::create_pipeline(&device, &config, &shader, &uniforms, &textures, samples)
+                .len(),
+            12
+        );
+    }
+    let error = pollster::block_on(device.pop_error_scope());
+    assert!(error.is_none(), "{error:?}");
+}
+
+#[cfg(test)]
+mod sample_tests;

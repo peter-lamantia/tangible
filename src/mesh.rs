@@ -1,17 +1,65 @@
 use glam::Vec3;
 
-/// A single vertex with position and normal, laid out for GPU upload.
+/// Vertex attributes laid out for GPU upload.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct Vertex {
     pub position: [f32; 3],
     pub normal: [f32; 3],
+    pub color: [f32; 4],
+    pub uv: [f32; 2],
+    /// Metallic, roughness, alpha cutoff (-2: opaque, -1: blend), unlit.
+    pub surface: [f32; 4],
+    pub emissive: [f32; 3],
+    /// UVs for metallic/roughness, normal, occlusion, and emissive maps.
+    pub map_uv: [[f32; 2]; 4],
+    /// Normal scale and occlusion strength.
+    pub map_factors: [f32; 2],
+    /// World-space tangent and bitangent handedness; zero means derive from UVs.
+    pub tangent: [f32; 4],
 }
 
-/// Shared triangle mesh data.
+impl Default for Vertex {
+    fn default() -> Self {
+        Self {
+            position: [0.; 3],
+            normal: [0.; 3],
+            color: [0.7, 0.75, 0.8, 1.],
+            uv: [0.; 2],
+            surface: [0., 0.5, -1., 0.],
+            emissive: [0.; 3],
+            map_uv: [[0.; 2]; 4],
+            map_factors: [0., 1.],
+            tangent: [0.; 4],
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Texture {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+    pub wrap: [u32; 2],
+    pub linear: [bool; 2],
+}
+#[derive(Debug, Clone)]
+pub struct Batch {
+    pub range: std::ops::Range<usize>,
+    pub topology: u8, // 0: triangles, 1: lines, 2: points
+    pub texture: Option<usize>,
+    pub maps: [Option<usize>; 4],
+    pub double_sided: bool,
+    pub blend: bool,
+}
+
+/// Shared render geometry.
 #[derive(Debug, Clone)]
 pub struct Mesh {
     pub vertices: std::sync::Arc<Vec<Vertex>>,
+    pub batches: Vec<Batch>,
+    pub textures: std::sync::Arc<Vec<Texture>>,
+    pub animation: Option<std::sync::Arc<crate::model::gltf::Scene>>,
     pub bounds_min: Vec3,
     pub bounds_max: Vec3,
 }
@@ -21,9 +69,24 @@ impl Mesh {
     pub fn empty() -> Self {
         Self {
             vertices: std::sync::Arc::new(Vec::new()),
+            batches: Vec::new(),
+            textures: Default::default(),
+            animation: None,
             bounds_min: Vec3::ZERO,
             bounds_max: Vec3::ZERO,
         }
+    }
+
+    pub fn primitive_counts(&self) -> [usize; 3] {
+        if self.batches.is_empty() {
+            return [self.vertices.len() / 3, 0, 0];
+        }
+        let mut counts = [0; 3];
+        for batch in &self.batches {
+            counts[batch.topology as usize] +=
+                batch.range.len() / [3, 2, 1][batch.topology as usize];
+        }
+        counts
     }
 
     /// Center point of the bounding box.
@@ -97,6 +160,9 @@ impl Mesh {
     pub(crate) fn triangle_builder(capacity: usize) -> Self {
         Self {
             vertices: std::sync::Arc::new(Vec::with_capacity(capacity.min(MAX_TRIANGLES) * 3)),
+            batches: Vec::new(),
+            textures: Default::default(),
+            animation: None,
             bounds_min: Vec3::splat(f32::INFINITY),
             bounds_max: Vec3::splat(f32::NEG_INFINITY),
         }
@@ -122,14 +188,18 @@ impl Mesh {
             let p = Vec3::from(position);
             self.bounds_min = self.bounds_min.min(p);
             self.bounds_max = self.bounds_max.max(p);
-            std::sync::Arc::make_mut(&mut self.vertices).push(Vertex { position, normal });
+            std::sync::Arc::make_mut(&mut self.vertices).push(Vertex {
+                position,
+                normal,
+                ..Default::default()
+            });
         }
         Ok(())
     }
 
     pub(crate) fn finish(self) -> MeshResult<Self> {
         if self.vertices.is_empty() {
-            return Err("Model contains no triangles".into());
+            return Err("Model contains no renderable primitives".into());
         }
         if !self.extent().is_finite() || !self.center().is_finite() {
             return Err("Model coordinates exceed supported range".into());

@@ -154,19 +154,23 @@ fn plate_preview_renders_geometry() {
             mesh::Vertex {
                 position: [-1.0, -1.0, 0.0],
                 normal: [0.0, 0.0, 1.0],
+                ..Default::default()
             },
             mesh::Vertex {
                 position: [1.0, -1.0, 0.0],
                 normal: [0.0, 0.0, 1.0],
+                ..Default::default()
             },
             mesh::Vertex {
                 position: [0.0, 1.0, 0.0],
                 normal: [0.0, 0.0, 1.0],
+                ..Default::default()
             },
         ]
         .into(),
         bounds_min: glam::Vec3::new(-1.0, -1.0, 0.0),
         bounds_max: glam::Vec3::new(1.0, 1.0, 0.0),
+        ..mesh::Mesh::empty()
     };
     let preview = plate_preview(&mesh, || true).unwrap();
     assert_eq!(preview.size, [400, 400]);

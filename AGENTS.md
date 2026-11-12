@@ -12,6 +12,6 @@ Tangible is a Rust desktop viewer for STL, OBJ, and 3MF models. Keep changes foc
 
 ## Development and checks
 
-Use stable Rust. Run `cargo build --locked --all-targets` and `cargo test --locked --all-targets` for changes that affect code. Tests live alongside the implementation. On Linux, CI installs `libwayland-dev`, `libxkbcommon-dev`, and `libgtk-3-dev`; a working graphics environment is needed to run the GUI.
+Use stable Rust. Always run `cargo clippy --locked --all-targets -- -D warnings` before finishing a task and fix any reported warnings. For changes that affect code, also run `cargo build --locked --all-targets` and `cargo test --locked --all-targets`. Tests live alongside the implementation. On Linux, CI installs `libwayland-dev`, `libxkbcommon-dev`, and `libgtk-3-dev`; a working graphics environment is needed to run the GUI.
 
 CI runs on Linux, macOS, and Windows. Keep platform-specific changes portable. The release workflow builds archives on pushes to `main` and publishes them under commit-specific tags. Update the README when user-facing behavior or distribution changes.

@@ -23,7 +23,7 @@ use ui::{format_number, plate_tile};
 
 struct FileInfo {
     units: Option<&'static str>,
-    num_triangles: usize,
+    geometry_summary: String,
     dimensions: glam::Vec3,
     center: glam::Vec3,
     extent: f32,
@@ -132,7 +132,7 @@ fn main() {
                 AppEvent::MeshLoaded { id, path, document: loaded } => {
                     if !loading::is_current(id) { return; }
                     let mesh = &loaded.mesh;
-                    let num_triangles = mesh.vertices.len() / 3;
+                    let geometry_summary = geometry_summary(mesh);
                     let center = mesh.center();
                     let extent = mesh.extent();
                     let dims = mesh.dimensions();
@@ -148,7 +148,7 @@ fn main() {
 
                     file_info = Some(FileInfo {
                         units: loaded.units,
-                        num_triangles,
+                        geometry_summary,
                         dimensions: dims,
                         center,
                         extent,
@@ -456,9 +456,7 @@ fn main() {
                                                         if info.units == Some("mm") { " mm" } else { "" }
                                                     )).small().color(color));
                                                     ui.add_space(16.0);
-                                                    ui.label(egui::RichText::new(format!(
-                                                        "{} triangles", format_number(info.num_triangles)
-                                                    )).small().color(color));
+                                                    ui.label(egui::RichText::new(&info.geometry_summary).small().color(color));
                                                 }
 
                                             },
@@ -649,7 +647,7 @@ fn main() {
                             if let (Some(doc), Some(info)) = (&document, &mut file_info) {
                                 let mesh = selection.map(|index| &doc.plates[index].mesh).unwrap_or(&doc.mesh);
                                 gpu.load_mesh(mesh);
-                                info.num_triangles = mesh.vertices.len() / 3;
+                                info.geometry_summary = geometry_summary(mesh);
                                 info.dimensions = mesh.dimensions();
                                 info.center = mesh.center();
                                 info.extent = mesh.extent();
@@ -704,7 +702,7 @@ fn main() {
                 }
             }
 
-            Event::AboutToWait if egui_ctx.has_requested_repaint() => {
+            Event::AboutToWait if egui_ctx.has_requested_repaint() || gpu.is_animated() => {
                 window.request_redraw();
             }
 
@@ -733,4 +731,14 @@ fn create_window() -> (EventLoop<AppEvent>, Arc<winit::window::Window>) {
     );
 
     (event_loop, window)
+}
+
+fn geometry_summary(mesh: &mesh::Mesh) -> String {
+    mesh.primitive_counts()
+        .into_iter()
+        .zip(["triangles", "lines", "points"])
+        .filter(|(count, _)| *count > 0)
+        .map(|(count, name)| format!("{} {name}", format_number(count)))
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
