@@ -52,15 +52,16 @@ cargo build --release
 
 Each push to `main` publishes builds for Linux and Windows on x86-64 and ARM64,
 and macOS on Intel and Apple silicon, on the [Releases page](https://github.com/peter-lamantia/tangible/releases).
-Download the executable for your platform and its SHA-256 checksum.
+Download the asset for your platform and its SHA-256 checksum. macOS builds are
+DMG disk images; Linux and Windows builds are executables.
 Choose `x86_64` for Intel or AMD processors and `arm64` for ARM processors,
 including Apple silicon. These additional architectures are built and tested in
 CI; GPU compatibility still depends on the device and its drivers.
 
 - **Windows:** Run the downloaded `.exe` file.
-- **macOS:** Run `chmod +x tangible-macos-*` and launch the downloaded executable
-  from Terminal. It is not signed or notarized, so macOS may require approval in
-  Privacy & Security.
+- **macOS:** Open the `.dmg`, drag `Tangible.app` to Applications, and launch it.
+  The app is not signed or notarized, so macOS may require approval in Privacy &
+  Security.
 - **Linux:** Run `chmod +x tangible-linux-*` and launch the downloaded executable.
 
 Linux source builds also require the Wayland, xkbcommon, and GTK 3 development

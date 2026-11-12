@@ -41,15 +41,15 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev libgtk-3-dev
       - name: Build
         run: cargo build --release --locked
-      - name: Prepare executable and checksum
+      - name: Prepare release asset and checksum
         shell: bash
         run: python scripts/package.py "${{ matrix.artifact }}" "target/release/${{ matrix.binary }}"
       - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
           path: |
-            ${{ matrix.artifact }}${{ runner.os == 'Windows' && '.exe' || '' }}
-            ${{ matrix.artifact }}${{ runner.os == 'Windows' && '.exe' || '' }}.sha256
+            ${{ matrix.artifact }}${{ runner.os == 'Windows' && '.exe' || runner.os == 'macOS' && '.dmg' || '' }}
+            ${{ matrix.artifact }}${{ runner.os == 'Windows' && '.exe' || runner.os == 'macOS' && '.dmg' || '' }}.sha256
           if-no-files-found: error
 
   release:
