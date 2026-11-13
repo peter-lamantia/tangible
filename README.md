@@ -59,6 +59,8 @@ including Apple silicon. These additional architectures are built and tested in
 CI; GPU compatibility still depends on the device and its drivers.
 
 - **Windows:** Run the downloaded `.exe` file.
+  Release builds open only the application window; debug builds retain a console
+  for diagnostic output.
   Windows MSVC builds statically link the Visual C++ runtime, so a separate
   Visual C++ Redistributable installation is not required. If an older download
   reports a missing `VCRUNTIME140.dll` or `MSVCP140.dll`, use a newer build or
