@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   build:
+    if: github.ref == 'refs/heads/main'
     strategy:
       fail-fast: false
       matrix:
@@ -19,12 +20,6 @@ jobs:
             binary: tangible
           - os: ubuntu-24.04-arm
             artifact: tangible-linux-arm64
-            binary: tangible
-          - os: macos-latest
-            artifact: tangible-macos-arm64
-            binary: tangible
-          - os: macos-15-intel
-            artifact: tangible-macos-x86_64
             binary: tangible
           - os: windows-latest
             artifact: tangible-windows-x86_64
@@ -48,12 +43,78 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: |
-            ${{ matrix.artifact }}${{ runner.os == 'Windows' && '.exe' || runner.os == 'macOS' && '.dmg' || '' }}
-            ${{ matrix.artifact }}${{ runner.os == 'Windows' && '.exe' || runner.os == 'macOS' && '.dmg' || '' }}.sha256
+            ${{ matrix.artifact }}${{ runner.os == 'Windows' && '.exe' || '' }}
+            ${{ matrix.artifact }}${{ runner.os == 'Windows' && '.exe' || '' }}.sha256
+          if-no-files-found: error
+
+  build-macos:
+    if: github.ref == 'refs/heads/main'
+    environment: prod
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            artifact: tangible-macos-arm64
+          - os: macos-15-intel
+            artifact: tangible-macos-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release --locked
+      - name: Sign and notarize the disk image
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_BASE64: ${{ secrets.MACOS_CERTIFICATE_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          : "${MACOS_CERTIFICATE_BASE64:?Set MACOS_CERTIFICATE_BASE64 in prod}"
+          : "${MACOS_CERTIFICATE_PASSWORD:?Set MACOS_CERTIFICATE_PASSWORD in prod}"
+          : "${APPLE_ID:?Set APPLE_ID in prod}"
+          : "${APPLE_TEAM_ID:?Set APPLE_TEAM_ID in prod}"
+          : "${APPLE_APP_SPECIFIC_PASSWORD:?Set APPLE_APP_SPECIFIC_PASSWORD in prod}"
+
+          signing_dir="$(mktemp -d "$RUNNER_TEMP/tangible-signing.XXXXXX")"
+          certificate="$signing_dir/certificate.p12"
+          export MACOS_SIGNING_KEYCHAIN="$signing_dir/signing.keychain-db"
+          trap 'security delete-keychain "$MACOS_SIGNING_KEYCHAIN" || true; rm -rf "$signing_dir"' EXIT
+
+          printf '%s' "$MACOS_CERTIFICATE_BASE64" | base64 --decode > "$certificate"
+          keychain_password="$(openssl rand -hex 32)"
+          echo "::add-mask::$keychain_password"
+          security create-keychain -p "$keychain_password" "$MACOS_SIGNING_KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$MACOS_SIGNING_KEYCHAIN"
+          security unlock-keychain -p "$keychain_password" "$MACOS_SIGNING_KEYCHAIN"
+          security import "$certificate" -P "$MACOS_CERTIFICATE_PASSWORD" -f pkcs12 \
+            -T /usr/bin/codesign -k "$MACOS_SIGNING_KEYCHAIN"
+          rm -f "$certificate"
+          unset MACOS_CERTIFICATE_BASE64 MACOS_CERTIFICATE_PASSWORD
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$MACOS_SIGNING_KEYCHAIN"
+          security list-keychains -d user -s "$MACOS_SIGNING_KEYCHAIN"
+
+          MACOS_SIGNING_IDENTITY="$(security find-identity -v -p codesigning "$MACOS_SIGNING_KEYCHAIN" |
+            awk '/"Developer ID Application: / { print $2 }')"
+          if [[ ! "$MACOS_SIGNING_IDENTITY" =~ ^[[:xdigit:]]{40}$ ]]; then
+            echo "::error::The certificate export must contain one valid Developer ID Application signing identity."
+            exit 1
+          fi
+          export MACOS_SIGNING_IDENTITY
+          python3 scripts/package.py "${{ matrix.artifact }}" target/release/tangible
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.dmg
+            ${{ matrix.artifact }}.dmg.sha256
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [build, build-macos]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

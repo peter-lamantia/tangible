@@ -65,8 +65,8 @@ CI; GPU compatibility still depends on the device and its drivers.
   install Microsoft's [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
   for your executable's architecture. Graphics drivers are still required.
 - **macOS:** Open the `.dmg`, drag `Tangible.app` to Applications, and launch it.
-  The app is not signed or notarized, so macOS may require approval in Privacy &
-  Security.
+  Current release disk images are signed with Developer ID and include Apple's
+  notarization ticket.
 - **Linux:** Run `chmod +x tangible-linux-*` and launch the downloaded executable.
 
 Linux source builds also require the Wayland, xkbcommon, and GTK 3 development
