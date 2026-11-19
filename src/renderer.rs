@@ -699,11 +699,37 @@ impl GpuState {
             pixels: vec![128, 128, 255, 255],
             ..white.clone()
         };
-        // Upload each source once. Color maps use an sRGB view; data maps use linear views.
+        let maps: Vec<[usize; 5]> = if mesh.batches.is_empty() {
+            vec![[0, 0, 1, 0, 0]]
+        } else {
+            mesh.batches
+                .iter()
+                .map(|b| {
+                    let maps = [b.texture, b.maps[0], b.maps[1], b.maps[2], b.maps[3]];
+                    std::array::from_fn(|slot| {
+                        maps[slot].map_or(usize::from(slot == 2), |index| index + 2)
+                    })
+                })
+                .collect()
+        };
+        // Color maps need sRGB decoding and data maps need linear sampling.
+        // Allocate in the required format directly for adapters without texture view formats.
+        let is_srgb = |slot| usize::from(slot == 0 || slot == 4);
+        let formats = [
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+        ];
+        let mut used_formats = vec![[false; 2]; mesh.textures.len() + 2];
+        for indices in &maps {
+            for (slot, &image) in indices.iter().enumerate() {
+                used_formats[image][is_srgb(slot)] = true;
+            }
+        }
         let uploaded: Vec<_> = [&white, &normal]
             .into_iter()
             .chain(mesh.textures.iter())
-            .map(|image| {
+            .zip(used_formats)
+            .map(|(image, used)| {
                 if !is_current() {
                     return None;
                 }
@@ -712,26 +738,37 @@ impl GpuState {
                     height: image.height,
                     depth_or_array_layers: 1,
                 };
-                let texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("Material texture"),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[wgpu::TextureFormat::Rgba8UnormSrgb],
-                });
-                queue.write_texture(
-                    texture.as_image_copy(),
-                    &image.pixels,
-                    wgpu::ImageDataLayout {
-                        offset: 0,
-                        bytes_per_row: Some(image.width * 4),
-                        rows_per_image: Some(image.height),
-                    },
-                    size,
-                );
+                let mut views = [None, None];
+                for (index, format) in formats.into_iter().enumerate() {
+                    if !used[index] {
+                        continue;
+                    }
+                    if !is_current() {
+                        return None;
+                    }
+                    let texture = device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Material texture"),
+                        size,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    });
+                    queue.write_texture(
+                        texture.as_image_copy(),
+                        &image.pixels,
+                        wgpu::ImageDataLayout {
+                            offset: 0,
+                            bytes_per_row: Some(image.width * 4),
+                            rows_per_image: Some(image.height),
+                        },
+                        size,
+                    );
+                    views[index] =
+                        Some(texture.create_view(&wgpu::TextureViewDescriptor::default()));
+                }
                 let address = |v| match v {
                     0 => wgpu::AddressMode::ClampToEdge,
                     2 => wgpu::AddressMode::MirrorRepeat,
@@ -751,49 +788,30 @@ impl GpuState {
                     min_filter: filter(image.linear[1]),
                     ..Default::default()
                 });
-                Some((texture, sampler))
+                Some((views, sampler))
             })
             .collect::<Option<Vec<_>>>()?;
-        let maps: Vec<[Option<usize>; 5]> = if mesh.batches.is_empty() {
-            vec![[None; 5]]
-        } else {
-            mesh.batches
-                .iter()
-                .map(|b| [b.texture, b.maps[0], b.maps[1], b.maps[2], b.maps[3]])
-                .collect()
-        };
         maps.iter()
-            .map(|maps| {
+            .map(|indices| {
                 if !is_current() {
                     return None;
                 }
-                let indices: [usize; 5] = std::array::from_fn(|slot| {
-                    maps[slot].map_or(usize::from(slot == 2), |i| i + 2)
-                });
-                let views: Vec<_> = indices
-                    .iter()
-                    .enumerate()
-                    .map(|(slot, &i)| {
-                        uploaded[i].0.create_view(&wgpu::TextureViewDescriptor {
-                            format: Some(if slot == 0 || slot == 4 {
-                                wgpu::TextureFormat::Rgba8UnormSrgb
-                            } else {
-                                wgpu::TextureFormat::Rgba8Unorm
-                            }),
-                            ..Default::default()
-                        })
-                    })
-                    .collect();
                 let entries: Vec<_> = (0..10)
-                    .map(|binding| wgpu::BindGroupEntry {
-                        binding,
-                        resource: if binding % 2 == 0 {
-                            wgpu::BindingResource::TextureView(&views[binding as usize / 2])
-                        } else {
-                            wgpu::BindingResource::Sampler(
-                                &uploaded[indices[binding as usize / 2]].1,
-                            )
-                        },
+                    .map(|binding| {
+                        let slot = binding as usize / 2;
+                        let (views, sampler) = &uploaded[indices[slot]];
+                        wgpu::BindGroupEntry {
+                            binding,
+                            resource: if binding % 2 == 0 {
+                                wgpu::BindingResource::TextureView(
+                                    views[is_srgb(slot)]
+                                        .as_ref()
+                                        .expect("required texture format"),
+                                )
+                            } else {
+                                wgpu::BindingResource::Sampler(sampler)
+                            },
+                        }
                     })
                     .collect();
                 Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1356,6 +1374,24 @@ fn uploads_run_off_thread_and_cancel_between_chunks() {
     let mut mesh = mesh::Mesh::empty();
     let chunk_size = vertex_chunk_size(device.limits().max_buffer_size).min(196_608);
     mesh.vertices = Arc::new(vec![mesh::Vertex::default(); chunk_size + 3]);
+    mesh.textures = Arc::new(vec![mesh::Texture {
+        width: 1,
+        height: 1,
+        pixels: vec![128, 64, 32, 255],
+        wrap: [1; 2],
+        linear: [true; 2],
+    }]);
+    mesh.batches.push(mesh::Batch {
+        range: 0..mesh.vertices.len(),
+        source_indices: None,
+        material: Default::default(),
+        topology: mesh::Topology::Triangles,
+        texture: Some(0),
+        // Use the same image as a color map and as linear material data.
+        maps: [Some(0), None, None, None],
+        double_sided: true,
+        blend: false,
+    });
     worker
         .send(UploadJob {
             revision,
@@ -1420,7 +1456,8 @@ fn uploads_run_off_thread_and_cancel_between_chunks() {
         mpsc::TryRecvError::Disconnected
     );
     device.poll(wgpu::Maintain::Wait);
-    assert!(pollster::block_on(device.pop_error_scope()).is_none());
+    let error = pollster::block_on(device.pop_error_scope());
+    assert!(error.is_none(), "GPU validation error: {error:?}");
 }
 
 #[cfg(test)]
