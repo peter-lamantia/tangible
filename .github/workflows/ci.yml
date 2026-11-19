@@ -64,6 +64,9 @@ jobs:
       - name: Prepare release asset
         shell: bash
         run: python scripts/package.py "${{ matrix.artifact }}" "target/release/${{ matrix.binary }}"
+      - name: Verify the Windows executable icon
+        if: runner.os == 'Windows'
+        run: python scripts/verify_release.py "${{ matrix.artifact }}.exe"
       - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
@@ -129,6 +132,8 @@ jobs:
           fi
           export MACOS_SIGNING_IDENTITY
           python3 scripts/package.py "${{ matrix.artifact }}" target/release/tangible
+      - name: Verify the signed and notarized disk image
+        run: python3 scripts/verify_release.py "${{ matrix.artifact }}.dmg"
       - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
