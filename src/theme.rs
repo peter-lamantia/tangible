@@ -63,8 +63,10 @@ pub fn setup_fonts(ctx: &egui::Context) {
 /// Apply Radix-inspired styling to egui context
 pub fn apply_theme(ctx: &egui::Context, is_dark: bool) {
     let mut visuals = if is_dark {
+        ctx.set_theme(egui::Theme::Dark);
         radix_dark_visuals()
     } else {
+        ctx.set_theme(egui::Theme::Light);
         radix_light_visuals()
     };
 
@@ -774,5 +776,26 @@ mod tests {
         let pref_dark = ThemePreference::Dark;
         assert!(pref_dark.is_dark(true));
         assert!(pref_dark.is_dark(false));
+    }
+
+    #[test]
+    fn explicit_theme_survives_system_theme_input() {
+        let ctx = egui::Context::default();
+        for (is_dark, app_theme, system_theme) in [
+            (true, egui::Theme::Dark, egui::Theme::Light),
+            (false, egui::Theme::Light, egui::Theme::Dark),
+        ] {
+            apply_theme(&ctx, is_dark);
+            let _ = ctx.run(
+                egui::RawInput {
+                    system_theme: Some(system_theme),
+                    ..Default::default()
+                },
+                |ctx| {
+                    assert_eq!(ctx.theme(), app_theme);
+                    assert_eq!(ctx.style().visuals.dark_mode, is_dark);
+                },
+            );
+        }
     }
 }

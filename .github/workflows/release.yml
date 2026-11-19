@@ -61,10 +61,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          # Keep in sync with the macOS compiler pin in ci.yml.
-          toolchain: '1.99.1'
+      - uses: dtolnay/rust-toolchain@stable
       - name: Build
         run: cargo build --release --locked
       - name: Sign and notarize the disk image

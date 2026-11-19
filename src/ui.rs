@@ -28,7 +28,7 @@ pub(crate) fn error_popup(ctx: &egui::Context, message: &str, bottom_height: f32
                 });
                 ui.separator();
                 egui::ScrollArea::vertical()
-                    .id_source(("load_error_text", message))
+                    .id_salt(("load_error_text", message))
                     .max_height(max_text_height)
                     .show(ui, |ui| {
                         ui.add(egui::Label::new(message).wrap());

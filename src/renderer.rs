@@ -82,6 +82,7 @@ impl GpuState {
                 label: None,
                 required_features: wgpu::Features::empty(),
                 required_limits: wgpu::Limits::default(),
+                memory_hints: wgpu::MemoryHints::default(),
             },
             None,
         ))
@@ -175,7 +176,7 @@ impl GpuState {
         let depth_view = Self::create_depth_texture(&device, &config, sample_count);
         let msaa_view = None;
 
-        let egui_renderer = egui_wgpu::Renderer::new(&device, config.format, None, 1);
+        let egui_renderer = egui_wgpu::Renderer::new(&device, config.format, None, 1, false);
 
         Ok(Self {
             surface,
@@ -335,6 +336,7 @@ impl GpuState {
                         ..Default::default()
                     },
                     multiview: None,
+                    cache: None,
                 })
             })
             .collect()
@@ -815,7 +817,7 @@ impl GpuState {
 
         // Pass 2: egui UI overlay
         {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("egui Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -830,8 +832,11 @@ impl GpuState {
                 occlusion_query_set: None,
             });
 
-            self.egui_renderer
-                .render(&mut pass, &clipped_primitives, &screen_descriptor);
+            self.egui_renderer.render(
+                &mut pass.forget_lifetime(),
+                &clipped_primitives,
+                &screen_descriptor,
+            );
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));

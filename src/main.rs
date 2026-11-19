@@ -9,11 +9,12 @@ mod theme;
 mod ui;
 
 use std::sync::Arc;
+use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Event, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{EventLoop, EventLoopBuilder};
+use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
-use winit::window::WindowBuilder;
+use winit::window::{Window, WindowId};
 
 use loading::{spawn_file_load, spawn_open_dialog, AppEvent};
 use renderer::GpuState;
@@ -41,9 +42,79 @@ fn main() {
         None
     };
 
-    let (event_loop, window) = create_window();
-    let proxy = event_loop.create_proxy();
+    let mut builder = EventLoop::<AppEvent>::with_user_event();
+    // Prefer X11 (including XWayland) for file-drop compatibility.
+    #[cfg(target_os = "linux")]
+    if std::env::var_os("WINIT_UNIX_BACKEND").is_none() && std::env::var_os("DISPLAY").is_some() {
+        use winit::platform::x11::EventLoopBuilderExtX11;
+        builder.with_x11();
+    }
+    let event_loop = builder.build().unwrap();
+    let mut viewer = Viewer {
+        initial_path,
+        proxy: event_loop.create_proxy(),
+        handle_event: None,
+    };
+    event_loop.run_app(&mut viewer).unwrap();
+}
 
+type ViewerEventHandler = Box<dyn FnMut(Event<AppEvent>, &ActiveEventLoop)>;
+
+struct Viewer {
+    initial_path: Option<std::path::PathBuf>,
+    proxy: EventLoopProxy<AppEvent>,
+    handle_event: Option<ViewerEventHandler>,
+}
+
+impl ApplicationHandler<AppEvent> for Viewer {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        if self.handle_event.is_some() {
+            return;
+        }
+        let window = Arc::new(
+            event_loop
+                .create_window(
+                    Window::default_attributes()
+                        .with_title("Tangible")
+                        .with_inner_size(LogicalSize::new(1280.0, 720.0)),
+                )
+                .expect("Failed to create window"),
+        );
+        self.handle_event = initialize_viewer(window, self.initial_path.take(), self.proxy.clone());
+        if self.handle_event.is_none() {
+            event_loop.exit();
+        }
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
+        if let Some(handle_event) = &mut self.handle_event {
+            handle_event(Event::UserEvent(event), event_loop);
+        }
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
+        if let Some(handle_event) = &mut self.handle_event {
+            handle_event(Event::WindowEvent { window_id, event }, event_loop);
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(handle_event) = &mut self.handle_event {
+            handle_event(Event::AboutToWait, event_loop);
+        }
+    }
+}
+
+fn initialize_viewer(
+    window: Arc<Window>,
+    initial_path: Option<std::path::PathBuf>,
+    proxy: EventLoopProxy<AppEvent>,
+) -> Option<ViewerEventHandler> {
     let egui_ctx = egui::Context::default();
     theme::setup_fonts(&egui_ctx);
     let cube_image = egui::ColorImage::from_rgba_unmultiplied(
@@ -64,6 +135,7 @@ fn main() {
         egui::ViewportId::ROOT,
         &window,
         Some(window.scale_factor() as f32),
+        window.theme(),
         None,
     );
 
@@ -84,7 +156,7 @@ fn main() {
                 .set_description(&error)
                 .set_level(rfd::MessageLevel::Error)
                 .show();
-            return;
+            return None;
         }
     };
     gpu.set_antialiasing(true);
@@ -119,186 +191,204 @@ fn main() {
     let mut requested_plate: Option<Option<usize>> = None;
 
     // ── Run event loop ───────────────────────────────────────────────────
-    event_loop
-        .run(move |event, elwt| match event {
-            // ── Background Task Events ───────────────────────────────────────
-            Event::UserEvent(app_event) => match app_event {
-                AppEvent::LoadingStarted { id, name } => {
-                    if !loading::is_current(id) { return; }
-                    loading_name = Some(name);
-                    error_message = None;
-                    window.request_redraw();
-                }
-                AppEvent::MeshLoaded { id, path, document: loaded } => {
-                    if !loading::is_current(id) { return; }
-                    let mesh = &loaded.mesh;
-                    let geometry_summary = geometry_summary(mesh);
-                    let center = mesh.center();
-                    let extent = mesh.extent();
-                    let dims = mesh.dimensions();
-                    let file_name = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .to_string();
-
-                    camera.frame_target(center, extent);
-                    gpu.load_mesh(mesh);
-                    window.set_title(&format!("Tangible — {file_name}"));
-
-                    file_info = Some(FileInfo {
-                        units: loaded.units,
-                        geometry_summary,
-                        dimensions: dims,
-                        center,
-                        extent,
-                    });
-                    all_preview = None;
-                    plate_previews = vec![None; loaded.plates.len()];
-                    selected_plate = None;
-                    document = Some(loaded);
-                    loading_name = None;
-                    error_message = None;
-                    window.request_redraw();
-                }
-                AppEvent::PreviewReady { id, plate, image } => {
-                    if !loading::is_current(id) { return; }
-                    let texture = egui_ctx.load_texture(format!("preview-{id}-{plate:?}"), image, egui::TextureOptions::LINEAR);
-                    if let Some(index) = plate {
-                        if let Some(slot) = plate_previews.get_mut(index) { *slot = Some(texture); }
-                    } else { all_preview = Some(texture); }
-                    window.request_redraw();
-                }
-                AppEvent::LoadError { id, path, error } => {
-                    if !loading::is_current(id) { return; }
-                    loading_name = None;
-                    error_message =
-                        Some(format!("Failed to load \"{}\": {error}", path.display()));
-                    window.request_redraw();
-                }
-            },
-
-            // ── Window Events ────────────────────────────────────────────────
-            Event::WindowEvent { event, .. } => {
-                let response = egui_state.on_window_event(&window, &event);
-                if response.repaint {
-                    window.request_redraw();
-                }
-
-                if response.consumed {
-                    if let WindowEvent::MouseInput {
-                        state: ElementState::Released,
-                        ..
-                    } = &event
-                    {
-                        left_pressed = false;
-                        right_pressed = false;
-                    }
+    Some(Box::new(move |event, elwt| match event {
+        // ── Background Task Events ───────────────────────────────────────
+        Event::UserEvent(app_event) => match app_event {
+            AppEvent::LoadingStarted { id, name } => {
+                if !loading::is_current(id) {
                     return;
                 }
+                loading_name = Some(name);
+                error_message = None;
+                window.request_redraw();
+            }
+            AppEvent::MeshLoaded {
+                id,
+                path,
+                document: loaded,
+            } => {
+                if !loading::is_current(id) {
+                    return;
+                }
+                let mesh = &loaded.mesh;
+                let geometry_summary = geometry_summary(mesh);
+                let center = mesh.center();
+                let extent = mesh.extent();
+                let dims = mesh.dimensions();
+                let file_name = path
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
 
-                match event {
-                    WindowEvent::CloseRequested => elwt.exit(),
+                camera.frame_target(center, extent);
+                gpu.load_mesh(mesh);
+                window.set_title(&format!("Tangible — {file_name}"));
 
-                    WindowEvent::ThemeChanged(theme) => {
-                        system_is_dark = matches!(theme, winit::window::Theme::Dark);
-                        let new_is_dark = theme_pref.is_dark(system_is_dark);
-                        if new_is_dark != is_dark {
-                            is_dark = new_is_dark;
-                            theme::apply_theme(&egui_ctx, is_dark);
-                        }
-                        window.request_redraw();
+                file_info = Some(FileInfo {
+                    units: loaded.units,
+                    geometry_summary,
+                    dimensions: dims,
+                    center,
+                    extent,
+                });
+                all_preview = None;
+                plate_previews = vec![None; loaded.plates.len()];
+                selected_plate = None;
+                document = Some(loaded);
+                loading_name = None;
+                error_message = None;
+                window.request_redraw();
+            }
+            AppEvent::PreviewReady { id, plate, image } => {
+                if !loading::is_current(id) {
+                    return;
+                }
+                let texture = egui_ctx.load_texture(
+                    format!("preview-{id}-{plate:?}"),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                );
+                if let Some(index) = plate {
+                    if let Some(slot) = plate_previews.get_mut(index) {
+                        *slot = Some(texture);
                     }
+                } else {
+                    all_preview = Some(texture);
+                }
+                window.request_redraw();
+            }
+            AppEvent::LoadError { id, path, error } => {
+                if !loading::is_current(id) {
+                    return;
+                }
+                loading_name = None;
+                error_message = Some(format!("Failed to load \"{}\": {error}", path.display()));
+                window.request_redraw();
+            }
+        },
 
-                    WindowEvent::Resized(size) => {
-                        gpu.resize(size.width, size.height);
-                        camera.aspect = size.width as f32 / size.height.max(1) as f32;
+        // ── Window Events ────────────────────────────────────────────────
+        Event::WindowEvent { event, .. } => {
+            let response = egui_state.on_window_event(&window, &event);
+            if response.repaint {
+                window.request_redraw();
+            }
+
+            if response.consumed {
+                if let WindowEvent::MouseInput {
+                    state: ElementState::Released,
+                    ..
+                } = &event
+                {
+                    left_pressed = false;
+                    right_pressed = false;
+                }
+                return;
+            }
+
+            match event {
+                WindowEvent::CloseRequested => elwt.exit(),
+
+                WindowEvent::ThemeChanged(theme) => {
+                    system_is_dark = matches!(theme, winit::window::Theme::Dark);
+                    let new_is_dark = theme_pref.is_dark(system_is_dark);
+                    if new_is_dark != is_dark {
+                        is_dark = new_is_dark;
+                        theme::apply_theme(&egui_ctx, is_dark);
                     }
+                    window.request_redraw();
+                }
 
-                    WindowEvent::DroppedFile(path) => {
-                        spawn_file_load(path, proxy.clone());
-                    }
+                WindowEvent::Resized(size) => {
+                    gpu.resize(size.width, size.height);
+                    camera.aspect = size.width as f32 / size.height.max(1) as f32;
+                }
 
-                    WindowEvent::ModifiersChanged(new_modifiers) => {
-                        modifiers = new_modifiers.state();
-                    }
+                WindowEvent::DroppedFile(path) => {
+                    spawn_file_load(path, proxy.clone());
+                }
 
-                    WindowEvent::KeyboardInput {
-                        event: key_event, ..
-                    } => {
-                        if key_event.state == ElementState::Pressed && !key_event.repeat {
-                            let is_ctrl_or_cmd =
-                                modifiers.control_key() || modifiers.super_key();
-                            let is_o = match &key_event.logical_key {
-                                Key::Character(s) => s.eq_ignore_ascii_case("o"),
-                                _ => key_event.physical_key == PhysicalKey::Code(KeyCode::KeyO),
-                            };
+                WindowEvent::ModifiersChanged(new_modifiers) => {
+                    modifiers = new_modifiers.state();
+                }
 
-                            if key_event.physical_key == PhysicalKey::Code(KeyCode::KeyF) && !is_ctrl_or_cmd && !egui_ctx.wants_keyboard_input() {
-                                if let Some(info) = &file_info {
-                                    camera.target = info.center;
-                                    camera.distance = camera.fit_distance(info.extent);
-                                    window.request_redraw();
-                                }
-                            }
-                            if is_o && (is_ctrl_or_cmd || !egui_ctx.wants_keyboard_input()) {
-                                spawn_open_dialog(proxy.clone());
-                            }
-                        }
-                    }
-
-                    WindowEvent::MouseInput { state, button, .. } => {
-                        let pressed = state == ElementState::Pressed;
-                        if pressed && egui_ctx.wants_pointer_input() {
-                            return;
-                        }
-                        match button {
-                            MouseButton::Left => left_pressed = pressed,
-                            MouseButton::Right | MouseButton::Middle => {
-                                right_pressed = pressed
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    WindowEvent::CursorMoved { position, .. } => {
-                        if let Some((lx, ly)) = last_cursor {
-                            let dx = position.x - lx;
-                            let dy = position.y - ly;
-
-                            if left_pressed {
-                                camera.orbit(dx as f32, dy as f32);
-                                window.request_redraw();
-                            }
-                            if right_pressed {
-                                camera.pan(dx as f32, dy as f32);
-                                window.request_redraw();
-                            }
-                        }
-                        last_cursor = Some((position.x, position.y));
-                    }
-
-                    WindowEvent::MouseWheel { delta, .. } => {
-                        if egui_ctx.wants_pointer_input() {
-                            return;
-                        }
-                        let scroll = match delta {
-                            MouseScrollDelta::LineDelta(_, y) => y,
-                            MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
+                WindowEvent::KeyboardInput {
+                    event: key_event, ..
+                } => {
+                    if key_event.state == ElementState::Pressed && !key_event.repeat {
+                        let is_ctrl_or_cmd = modifiers.control_key() || modifiers.super_key();
+                        let is_o = match &key_event.logical_key {
+                            Key::Character(s) => s.eq_ignore_ascii_case("o"),
+                            _ => key_event.physical_key == PhysicalKey::Code(KeyCode::KeyO),
                         };
-                        camera.zoom(scroll);
-                        window.request_redraw();
-                    }
 
-                    WindowEvent::Focused(false) => {
-                        left_pressed = false;
-                        right_pressed = false;
+                        if key_event.physical_key == PhysicalKey::Code(KeyCode::KeyF)
+                            && !is_ctrl_or_cmd
+                            && !egui_ctx.wants_keyboard_input()
+                        {
+                            if let Some(info) = &file_info {
+                                camera.target = info.center;
+                                camera.distance = camera.fit_distance(info.extent);
+                                window.request_redraw();
+                            }
+                        }
+                        if is_o && (is_ctrl_or_cmd || !egui_ctx.wants_keyboard_input()) {
+                            spawn_open_dialog(proxy.clone());
+                        }
                     }
+                }
 
-                    WindowEvent::RedrawRequested => {
-                        let raw_input = egui_state.take_egui_input(&window);
-                        let mut scene_left_points = 0.0;
-                        let full_output = egui_ctx.run(raw_input, |ctx| {
+                WindowEvent::MouseInput { state, button, .. } => {
+                    let pressed = state == ElementState::Pressed;
+                    if pressed && egui_ctx.wants_pointer_input() {
+                        return;
+                    }
+                    match button {
+                        MouseButton::Left => left_pressed = pressed,
+                        MouseButton::Right | MouseButton::Middle => right_pressed = pressed,
+                        _ => {}
+                    }
+                }
+
+                WindowEvent::CursorMoved { position, .. } => {
+                    if let Some((lx, ly)) = last_cursor {
+                        let dx = position.x - lx;
+                        let dy = position.y - ly;
+
+                        if left_pressed {
+                            camera.orbit(dx as f32, dy as f32);
+                            window.request_redraw();
+                        }
+                        if right_pressed {
+                            camera.pan(dx as f32, dy as f32);
+                            window.request_redraw();
+                        }
+                    }
+                    last_cursor = Some((position.x, position.y));
+                }
+
+                WindowEvent::MouseWheel { delta, .. } => {
+                    if egui_ctx.wants_pointer_input() {
+                        return;
+                    }
+                    let scroll = match delta {
+                        MouseScrollDelta::LineDelta(_, y) => y,
+                        MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
+                    };
+                    camera.zoom(scroll);
+                    window.request_redraw();
+                }
+
+                WindowEvent::Focused(false) => {
+                    left_pressed = false;
+                    right_pressed = false;
+                }
+
+                WindowEvent::RedrawRequested => {
+                    let raw_input = egui_state.take_egui_input(&window);
+                    let mut scene_left_points = 0.0;
+                    let full_output = egui_ctx.run(raw_input, |ctx| {
                             // ── Top Bar ──────────────────────────────────────────
                             egui::TopBottomPanel::top("top_panel")
                                 .frame(
@@ -397,10 +487,10 @@ fn main() {
                                                 if header_response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Minimize plates panel").clicked() {
                                                     plates_collapsed = true;
                                                 }
-                                                let mut header_ui = ui.child_ui(
-                                                    header.shrink2(egui::vec2(6.0, 0.0)),
-                                                    egui::Layout::left_to_right(egui::Align::Center),
-                                                    None,
+                                                let mut header_ui = ui.new_child(
+                                                    egui::UiBuilder::new()
+                                                        .max_rect(header.shrink2(egui::vec2(6.0, 0.0)))
+                                                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
                                                 );
                                                 if header_ui.add(egui::Label::new(egui::RichText::new("Plates").heading()).sense(egui::Sense::click()))
                                                     .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -504,11 +594,11 @@ fn main() {
                                         let card_x = available.center().x - card_w * 0.5 - card_inner;
                                         let card_y = (available.center().y - card_height * 0.5).max(available.top() + 16.0);
 
-                                        ui.allocate_ui_at_rect(
-                                            egui::Rect::from_min_size(
+                                        ui.allocate_new_ui(
+                                            egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
                                                 egui::pos2(card_x, card_y),
                                                 egui::vec2(card_w + card_inner * 2.0, card_height),
-                                            ),
+                                            )),
                                             |ui| {
                                                 egui::Frame::none()
                                                     .inner_margin(card_inner)
@@ -640,97 +730,78 @@ fn main() {
                             }
                         });
 
-                        egui_state.handle_platform_output(&window, full_output.platform_output);
+                    egui_state.handle_platform_output(&window, full_output.platform_output);
 
-                        if let Some(selection) = requested_plate.take() {
-                            selected_plate = selection;
-                            if let (Some(doc), Some(info)) = (&document, &mut file_info) {
-                                let mesh = selection.map(|index| &doc.plates[index].mesh).unwrap_or(&doc.mesh);
-                                gpu.load_mesh(mesh);
-                                info.geometry_summary = geometry_summary(mesh);
-                                info.dimensions = mesh.dimensions();
-                                info.center = mesh.center();
-                                info.extent = mesh.extent();
-                                camera.frame_target(info.center, info.extent);
-                            }
-                            window.request_redraw();
+                    if let Some(selection) = requested_plate.take() {
+                        selected_plate = selection;
+                        if let (Some(doc), Some(info)) = (&document, &mut file_info) {
+                            let mesh = selection
+                                .map(|index| &doc.plates[index].mesh)
+                                .unwrap_or(&doc.mesh);
+                            gpu.load_mesh(mesh);
+                            info.geometry_summary = geometry_summary(mesh);
+                            info.dimensions = mesh.dimensions();
+                            info.center = mesh.center();
+                            info.extent = mesh.extent();
+                            camera.frame_target(info.center, info.extent);
                         }
-
-                        if should_update_theme {
-                            should_update_theme = false;
-                            let new_is_dark = theme_pref.is_dark(system_is_dark);
-                            if new_is_dark != is_dark {
-                                is_dark = new_is_dark;
-                                theme::apply_theme(&egui_ctx, is_dark);
-                            }
-                            window.request_redraw();
-                        }
-
-                        let scene_left = (scene_left_points * full_output.pixels_per_point).round() as u32;
-                        camera.aspect = (gpu.config.width.saturating_sub(scene_left).max(1)) as f32 / gpu.config.height.max(1) as f32;
-                        gpu.render(
-                            &camera,
-                            &egui_ctx,
-                            full_output.shapes,
-                            &full_output.textures_delta,
-                            full_output.pixels_per_point,
-                            scene_left,
-                            is_dark,
-                        );
-
-                        if should_open_file {
-                            should_open_file = false;
-                            spawn_open_dialog(proxy.clone());
-                        }
-
-                        if should_reset_camera {
-                            should_reset_camera = false;
-                            if let Some(info) = &file_info {
-                                camera.frame_target(info.center, info.extent);
-                            }
-                            window.request_redraw();
-                        }
-
-                        if should_clear_error {
-                            should_clear_error = false;
-                            error_message = None;
-                            window.request_redraw();
-                        }
+                        window.request_redraw();
                     }
 
-                    _ => {}
+                    if should_update_theme {
+                        should_update_theme = false;
+                        let new_is_dark = theme_pref.is_dark(system_is_dark);
+                        if new_is_dark != is_dark {
+                            is_dark = new_is_dark;
+                            theme::apply_theme(&egui_ctx, is_dark);
+                        }
+                        window.request_redraw();
+                    }
+
+                    let scene_left =
+                        (scene_left_points * full_output.pixels_per_point).round() as u32;
+                    camera.aspect = (gpu.config.width.saturating_sub(scene_left).max(1)) as f32
+                        / gpu.config.height.max(1) as f32;
+                    gpu.render(
+                        &camera,
+                        &egui_ctx,
+                        full_output.shapes,
+                        &full_output.textures_delta,
+                        full_output.pixels_per_point,
+                        scene_left,
+                        is_dark,
+                    );
+
+                    if should_open_file {
+                        should_open_file = false;
+                        spawn_open_dialog(proxy.clone());
+                    }
+
+                    if should_reset_camera {
+                        should_reset_camera = false;
+                        if let Some(info) = &file_info {
+                            camera.frame_target(info.center, info.extent);
+                        }
+                        window.request_redraw();
+                    }
+
+                    if should_clear_error {
+                        should_clear_error = false;
+                        error_message = None;
+                        window.request_redraw();
+                    }
                 }
+
+                _ => {}
             }
+        }
 
-            Event::AboutToWait if egui_ctx.has_requested_repaint() || gpu.is_animated() => {
-                window.request_redraw();
-            }
+        Event::AboutToWait if egui_ctx.has_requested_repaint() || gpu.is_animated() => {
+            window.request_redraw();
+        }
 
-            _ => {}
-        })
-        .unwrap();
-}
-
-fn create_window() -> (EventLoop<AppEvent>, Arc<winit::window::Window>) {
-    let mut event_loop_builder = EventLoopBuilder::<AppEvent>::with_user_event();
-    // winit 0.29 does not deliver file-drop events on Wayland. Prefer X11
-    // (including XWayland) when available, unless the user chose a backend.
-    #[cfg(target_os = "linux")]
-    if std::env::var_os("WINIT_UNIX_BACKEND").is_none() && std::env::var_os("DISPLAY").is_some() {
-        use winit::platform::x11::EventLoopBuilderExtX11;
-        event_loop_builder.with_x11();
-    }
-    let event_loop: EventLoop<AppEvent> = event_loop_builder.build().unwrap();
-
-    let window = Arc::new(
-        WindowBuilder::new()
-            .with_title("Tangible")
-            .with_inner_size(LogicalSize::new(1280.0, 720.0))
-            .build(&event_loop)
-            .expect("Failed to create window"),
-    );
-
-    (event_loop, window)
+        _ => {}
+    }))
 }
 
 fn geometry_summary(mesh: &mesh::Mesh) -> String {
