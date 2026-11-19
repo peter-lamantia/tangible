@@ -2,8 +2,10 @@ mod camera;
 mod loading;
 mod mesh;
 mod model;
+mod preferences;
 mod preview;
 mod renderer;
+mod repaint;
 mod stl;
 mod theme;
 mod ui;
@@ -16,7 +18,7 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
-use loading::{spawn_file_load, spawn_open_dialog, AppEvent};
+use loading::{AppEvent, Loader};
 use renderer::GpuState;
 use ui::{format_number, plate_tile};
 
@@ -58,12 +60,10 @@ fn main() {
     event_loop.run_app(&mut viewer).unwrap();
 }
 
-type ViewerEventHandler = Box<dyn FnMut(Event<AppEvent>, &ActiveEventLoop)>;
-
 struct Viewer {
     initial_path: Option<std::path::PathBuf>,
     proxy: EventLoopProxy<AppEvent>,
-    handle_event: Option<ViewerEventHandler>,
+    handle_event: Option<ViewerState>,
 }
 
 impl ApplicationHandler<AppEvent> for Viewer {
@@ -71,15 +71,16 @@ impl ApplicationHandler<AppEvent> for Viewer {
         if self.handle_event.is_some() {
             return;
         }
+        let prefs = preferences::Preferences::load();
         let attributes = Window::default_attributes()
             .with_title("Tangible")
-            .with_inner_size(LogicalSize::new(1280.0, 720.0));
+            .with_inner_size(LogicalSize::new(prefs.width, prefs.height));
         #[cfg(windows)]
         let attributes = {
             use winit::platform::windows::{IconExtWindows, WindowAttributesExtWindows};
             use winit::window::Icon;
 
-            let icon = Icon::from_resource(1, None).expect("Invalid Windows application icon");
+            let icon = Icon::from_resource(101, None).expect("Invalid Windows application icon");
             attributes
                 .with_window_icon(Some(icon.clone()))
                 .with_taskbar_icon(Some(icon))
@@ -97,7 +98,7 @@ impl ApplicationHandler<AppEvent> for Viewer {
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
         if let Some(handle_event) = &mut self.handle_event {
-            handle_event(Event::UserEvent(event), event_loop);
+            handle_event.handle_event(Event::UserEvent(event), event_loop);
         }
     }
 
@@ -108,13 +109,13 @@ impl ApplicationHandler<AppEvent> for Viewer {
         event: WindowEvent,
     ) {
         if let Some(handle_event) = &mut self.handle_event {
-            handle_event(Event::WindowEvent { window_id, event }, event_loop);
+            handle_event.handle_event(Event::WindowEvent { window_id, event }, event_loop);
         }
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(handle_event) = &mut self.handle_event {
-            handle_event(Event::AboutToWait, event_loop);
+            handle_event.handle_event(Event::AboutToWait, event_loop);
         }
     }
 }
@@ -123,8 +124,19 @@ fn initialize_viewer(
     window: Arc<Window>,
     initial_path: Option<std::path::PathBuf>,
     proxy: EventLoopProxy<AppEvent>,
-) -> Option<ViewerEventHandler> {
+) -> Option<ViewerState> {
     let egui_ctx = egui::Context::default();
+    let repaint_proxy = proxy.clone();
+    egui_ctx.set_request_repaint_callback(move |info| {
+        if info.viewport_id == egui::ViewportId::ROOT {
+            if let Some(deadline) = std::time::Instant::now().checked_add(info.delay) {
+                let _ = repaint_proxy.send_event(AppEvent::RepaintRequested {
+                    deadline,
+                    pass: info.current_cumulative_pass_nr,
+                });
+            }
+        }
+    });
     theme::setup_fonts(&egui_ctx);
     let cube_image = egui::ColorImage::from_rgba_unmultiplied(
         [256, 256],
@@ -134,12 +146,13 @@ fn initialize_viewer(
         egui_ctx.load_texture("impossible_cube", cube_image, egui::TextureOptions::LINEAR);
 
     let system_theme = window.theme().unwrap_or(winit::window::Theme::Dark);
-    let mut system_is_dark = matches!(system_theme, winit::window::Theme::Dark);
-    let mut theme_pref = theme::ThemePreference::System;
-    let mut is_dark = theme_pref.is_dark(system_is_dark);
+    let system_is_dark = matches!(system_theme, winit::window::Theme::Dark);
+    let prefs = preferences::Preferences::load();
+    let theme_pref = prefs.theme;
+    let is_dark = theme_pref.is_dark(system_is_dark);
     theme::apply_theme(&egui_ctx, is_dark);
 
-    let mut egui_state = egui_winit::State::new(
+    let egui_state = egui_winit::State::new(
         egui_ctx.clone(),
         egui::ViewportId::ROOT,
         &window,
@@ -148,16 +161,17 @@ fn initialize_viewer(
         None,
     );
 
-    let mut file_info: Option<FileInfo> = None;
-    let mut loading_name: Option<String> = None;
-    let mut error_message: Option<String> = None;
+    let file_info: Option<FileInfo> = None;
+    let loading_name: Option<String> = None;
+    let error_message: Option<String> = None;
     let mut camera = camera::Camera::new(glam::Vec3::ZERO, 5.0);
 
+    camera.orthographic = prefs.orthographic;
     let size = window.inner_size();
     camera.aspect = size.width as f32 / size.height.max(1) as f32;
 
     let initial_mesh = mesh::Mesh::empty();
-    let mut gpu = match GpuState::new(window.clone(), &initial_mesh) {
+    let mut gpu = match GpuState::new(window.clone(), &initial_mesh, proxy.clone()) {
         Ok(gpu) => gpu,
         Err(error) => {
             rfd::MessageDialog::new()
@@ -169,54 +183,147 @@ fn initialize_viewer(
         }
     };
     gpu.set_antialiasing(true);
-    let mut document: Option<Arc<model::ModelDocument>> = None;
-    let mut plate_previews: Vec<Option<egui::TextureHandle>> = Vec::new();
-    let mut all_preview: Option<egui::TextureHandle> = None;
-    let mut selected_plate: Option<usize> = None;
-    let mut plates_collapsed = false;
-    let mut cube_offset = egui::Vec2::ZERO;
-    let mut cube_velocity = egui::Vec2::ZERO;
-    let mut cube_last_time = std::time::Instant::now();
-    let mut cube_dragged = false;
-    let mut cube_angle: f32 = 0.0;
-    let mut cube_spin: f32 = 0.0;
-    let mut cube_entered = false;
+    let document: Option<Arc<model::ModelDocument>> = None;
+    let plate_previews: Vec<Option<egui::TextureHandle>> = Vec::new();
+    let all_preview: Option<egui::TextureHandle> = None;
+    let selected_plate: Option<usize> = None;
+    let plates_collapsed = false;
+    let cube_offset = egui::Vec2::ZERO;
+    let cube_velocity = egui::Vec2::ZERO;
+    let cube_last_time = std::time::Instant::now();
+    let cube_dragged = false;
+    let cube_angle: f32 = 0.0;
+    let cube_spin: f32 = 0.0;
+    let cube_entered = false;
 
+    let loader = Loader::new();
     // Load initial file in background if specified via CLI
     if let Some(path) = initial_path {
-        spawn_file_load(path, proxy.clone());
+        loader.spawn_file_load(path, proxy.clone());
     }
 
     // ── Interaction state ────────────────────────────────────────────────
-    let mut left_pressed = false;
-    let mut right_pressed = false;
-    let mut last_cursor: Option<(f64, f64)> = None;
-    let mut modifiers = ModifiersState::default();
+    let left_pressed = false;
+    let right_pressed = false;
+    let last_cursor: Option<(f64, f64)> = None;
+    let modifiers = ModifiersState::default();
 
-    let mut should_open_file = false;
-    let mut should_reset_camera = false;
-    let mut should_clear_error = false;
-    let mut should_update_theme = false;
-    let mut requested_plate: Option<Option<usize>> = None;
+    let should_open_file = false;
+    let should_reset_camera = false;
+    let should_clear_error = false;
+    let should_update_theme = false;
+    let requested_plate: Option<Option<usize>> = None;
 
     // ── Run event loop ───────────────────────────────────────────────────
-    Some(Box::new(move |event, elwt| match event {
-        // ── Background Task Events ───────────────────────────────────────
-        Event::UserEvent(app_event) => match app_event {
+    Some(ViewerState {
+        repaint: Default::default(),
+        loader,
+        window,
+        proxy,
+        egui_ctx,
+        egui_state,
+        cube_texture,
+        system_is_dark,
+        theme_pref,
+        is_dark,
+        file_info,
+        loading_name,
+        error_message,
+        camera,
+        gpu,
+        document,
+        plate_previews,
+        all_preview,
+        selected_plate,
+        plates_collapsed,
+        cube_offset,
+        cube_velocity,
+        cube_last_time,
+        cube_dragged,
+        cube_angle,
+        cube_spin,
+        cube_entered,
+        left_pressed,
+        right_pressed,
+        last_cursor,
+        modifiers,
+        should_open_file,
+        should_reset_camera,
+        should_clear_error,
+        should_update_theme,
+        requested_plate,
+    })
+}
+
+struct ViewerState {
+    repaint: repaint::RepaintSchedule,
+    loader: Loader,
+    window: Arc<Window>,
+    proxy: EventLoopProxy<AppEvent>,
+    egui_ctx: egui::Context,
+    egui_state: egui_winit::State,
+    cube_texture: egui::TextureHandle,
+    system_is_dark: bool,
+    theme_pref: theme::ThemePreference,
+    is_dark: bool,
+    file_info: Option<FileInfo>,
+    loading_name: Option<String>,
+    error_message: Option<String>,
+    camera: camera::Camera,
+    gpu: GpuState,
+    document: Option<Arc<model::ModelDocument>>,
+    plate_previews: Vec<Option<egui::TextureHandle>>,
+    all_preview: Option<egui::TextureHandle>,
+    selected_plate: Option<usize>,
+    plates_collapsed: bool,
+    cube_offset: egui::Vec2,
+    cube_velocity: egui::Vec2,
+    cube_last_time: std::time::Instant,
+    cube_dragged: bool,
+    cube_angle: f32,
+    cube_spin: f32,
+    cube_entered: bool,
+    left_pressed: bool,
+    right_pressed: bool,
+    last_cursor: Option<(f64, f64)>,
+    modifiers: ModifiersState,
+    should_open_file: bool,
+    should_reset_camera: bool,
+    should_clear_error: bool,
+    should_update_theme: bool,
+    requested_plate: Option<Option<usize>>,
+}
+
+impl ViewerState {
+    fn handle_app_event(&mut self, app_event: AppEvent) {
+        match app_event {
+            AppEvent::RepaintRequested { deadline, pass } => {
+                // Requests emitted during a completed pass are reflected in its output.
+                if pass >= self.egui_ctx.cumulative_pass_nr() {
+                    self.repaint.request(deadline);
+                }
+            }
+            AppEvent::GpuUploadReady(prepared) => {
+                if self.gpu.accept_upload(prepared) {
+                    self.loading_name = None;
+                    self.window.request_redraw();
+                }
+            }
             AppEvent::LoadingStarted { id, name } => {
-                if !loading::is_current(id) {
+                if !self.loader.is_current(id) {
                     return;
                 }
-                loading_name = Some(name);
-                error_message = None;
-                window.request_redraw();
+                self.gpu.cancel_upload();
+                self.loading_name = Some(name);
+                self.error_message = None;
+                self.window.request_redraw();
             }
             AppEvent::MeshLoaded {
                 id,
                 path,
                 document: loaded,
             } => {
-                if !loading::is_current(id) {
+                if !self.loader.is_current(id) {
                     return;
                 }
                 let mesh = &loaded.mesh;
@@ -230,174 +337,198 @@ fn initialize_viewer(
                     .to_string_lossy()
                     .to_string();
 
-                camera.frame_target(center, extent);
-                gpu.load_mesh(mesh);
-                window.set_title(&format!("Tangible — {file_name}"));
+                self.camera.frame_target(center, extent);
+                self.gpu.load_mesh(mesh);
+                self.window.set_title(&format!("Tangible — {file_name}"));
 
-                file_info = Some(FileInfo {
+                self.file_info = Some(FileInfo {
                     units: loaded.units,
                     geometry_summary,
                     dimensions: dims,
                     center,
                     extent,
                 });
-                all_preview = None;
-                plate_previews = vec![None; loaded.plates.len()];
-                selected_plate = None;
-                document = Some(loaded);
-                loading_name = None;
-                error_message = None;
-                window.request_redraw();
+                self.all_preview = None;
+                self.plate_previews = vec![None; loaded.plates.len()];
+                self.selected_plate = None;
+                self.document = Some(loaded);
+                self.error_message = None;
+                self.window.request_redraw();
             }
             AppEvent::PreviewReady { id, plate, image } => {
-                if !loading::is_current(id) {
+                if !self.loader.is_current(id) {
                     return;
                 }
-                let texture = egui_ctx.load_texture(
+                let texture = self.egui_ctx.load_texture(
                     format!("preview-{id}-{plate:?}"),
                     image,
                     egui::TextureOptions::LINEAR,
                 );
                 if let Some(index) = plate {
-                    if let Some(slot) = plate_previews.get_mut(index) {
+                    if let Some(slot) = self.plate_previews.get_mut(index) {
                         *slot = Some(texture);
                     }
                 } else {
-                    all_preview = Some(texture);
+                    self.all_preview = Some(texture);
                 }
-                window.request_redraw();
+                self.window.request_redraw();
             }
             AppEvent::LoadError { id, path, error } => {
-                if !loading::is_current(id) {
+                if !self.loader.is_current(id) {
                     return;
                 }
-                loading_name = None;
-                error_message = Some(format!("Failed to load \"{}\": {error}", path.display()));
-                window.request_redraw();
+                self.loading_name = None;
+                self.error_message =
+                    Some(format!("Failed to load \"{}\": {error}", path.display()));
+                self.window.request_redraw();
             }
-        },
+        }
+    }
 
-        // ── Window Events ────────────────────────────────────────────────
-        Event::WindowEvent { event, .. } => {
-            let response = egui_state.on_window_event(&window, &event);
-            if response.repaint {
-                window.request_redraw();
-            }
+    fn handle_event(&mut self, event: Event<AppEvent>, elwt: &ActiveEventLoop) {
+        match event {
+            // ── Background Task Events ───────────────────────────────────────
+            Event::UserEvent(app_event) => self.handle_app_event(app_event),
 
-            if response.consumed {
-                if let WindowEvent::MouseInput {
-                    state: ElementState::Released,
-                    ..
-                } = &event
-                {
-                    left_pressed = false;
-                    right_pressed = false;
+            // ── Window Events ────────────────────────────────────────────────
+            Event::WindowEvent { event, .. } => {
+                let response = self.egui_state.on_window_event(&self.window, &event);
+                // egui-winit flags RedrawRequested as needing repaint. We already
+                // render it below, so queuing another one here would prevent idle.
+                if response.repaint && !matches!(event, WindowEvent::RedrawRequested) {
+                    self.window.request_redraw();
                 }
-                return;
-            }
 
-            match event {
-                WindowEvent::CloseRequested => elwt.exit(),
-
-                WindowEvent::ThemeChanged(theme) => {
-                    system_is_dark = matches!(theme, winit::window::Theme::Dark);
-                    let new_is_dark = theme_pref.is_dark(system_is_dark);
-                    if new_is_dark != is_dark {
-                        is_dark = new_is_dark;
-                        theme::apply_theme(&egui_ctx, is_dark);
+                if response.consumed {
+                    if let WindowEvent::MouseInput {
+                        state: ElementState::Released,
+                        ..
+                    } = &event
+                    {
+                        self.left_pressed = false;
+                        self.right_pressed = false;
                     }
-                    window.request_redraw();
+                    return;
                 }
 
-                WindowEvent::Resized(size) => {
-                    gpu.resize(size.width, size.height);
-                    camera.aspect = size.width as f32 / size.height.max(1) as f32;
-                }
+                match event {
+                    WindowEvent::CloseRequested => {
+                        let size = self
+                            .window
+                            .inner_size()
+                            .to_logical::<u32>(self.window.scale_factor());
+                        preferences::Preferences {
+                            theme: self.theme_pref,
+                            orthographic: self.camera.orthographic,
+                            width: size.width,
+                            height: size.height,
+                        }
+                        .save();
+                        elwt.exit();
+                    }
 
-                WindowEvent::DroppedFile(path) => {
-                    spawn_file_load(path, proxy.clone());
-                }
+                    WindowEvent::ThemeChanged(theme) => {
+                        self.system_is_dark = matches!(theme, winit::window::Theme::Dark);
+                        let new_is_dark = self.theme_pref.is_dark(self.system_is_dark);
+                        if new_is_dark != self.is_dark {
+                            self.is_dark = new_is_dark;
+                            theme::apply_theme(&self.egui_ctx, self.is_dark);
+                        }
+                        self.window.request_redraw();
+                    }
 
-                WindowEvent::ModifiersChanged(new_modifiers) => {
-                    modifiers = new_modifiers.state();
-                }
+                    WindowEvent::Resized(size) => {
+                        self.gpu.resize(size.width, size.height);
+                        self.camera.aspect = size.width as f32 / size.height.max(1) as f32;
+                    }
 
-                WindowEvent::KeyboardInput {
-                    event: key_event, ..
-                } => {
-                    if key_event.state == ElementState::Pressed && !key_event.repeat {
-                        let is_ctrl_or_cmd = modifiers.control_key() || modifiers.super_key();
-                        let is_o = match &key_event.logical_key {
-                            Key::Character(s) => s.eq_ignore_ascii_case("o"),
-                            _ => key_event.physical_key == PhysicalKey::Code(KeyCode::KeyO),
-                        };
+                    WindowEvent::DroppedFile(path) => {
+                        self.loader.spawn_file_load(path, self.proxy.clone());
+                    }
 
-                        if key_event.physical_key == PhysicalKey::Code(KeyCode::KeyF)
-                            && !is_ctrl_or_cmd
-                            && !egui_ctx.wants_keyboard_input()
-                        {
-                            if let Some(info) = &file_info {
-                                camera.target = info.center;
-                                camera.distance = camera.fit_distance(info.extent);
-                                window.request_redraw();
+                    WindowEvent::ModifiersChanged(new_modifiers) => {
+                        self.modifiers = new_modifiers.state();
+                    }
+
+                    WindowEvent::KeyboardInput {
+                        event: key_event, ..
+                    } => {
+                        if key_event.state == ElementState::Pressed && !key_event.repeat {
+                            let is_ctrl_or_cmd =
+                                self.modifiers.control_key() || self.modifiers.super_key();
+                            let is_o = match &key_event.logical_key {
+                                Key::Character(s) => s.eq_ignore_ascii_case("o"),
+                                _ => key_event.physical_key == PhysicalKey::Code(KeyCode::KeyO),
+                            };
+
+                            if key_event.physical_key == PhysicalKey::Code(KeyCode::KeyF)
+                                && !is_ctrl_or_cmd
+                                && !self.egui_ctx.wants_keyboard_input()
+                            {
+                                if let Some(info) = &self.file_info {
+                                    self.camera.target = info.center;
+                                    self.camera.distance = self.camera.fit_distance(info.extent);
+                                    self.window.request_redraw();
+                                }
+                            }
+                            if is_o && (is_ctrl_or_cmd || !self.egui_ctx.wants_keyboard_input()) {
+                                self.loader.spawn_open_dialog(self.proxy.clone());
                             }
                         }
-                        if is_o && (is_ctrl_or_cmd || !egui_ctx.wants_keyboard_input()) {
-                            spawn_open_dialog(proxy.clone());
+                    }
+
+                    WindowEvent::MouseInput { state, button, .. } => {
+                        let pressed = state == ElementState::Pressed;
+                        if pressed && self.egui_ctx.wants_pointer_input() {
+                            return;
+                        }
+                        match button {
+                            MouseButton::Left => self.left_pressed = pressed,
+                            MouseButton::Right | MouseButton::Middle => {
+                                self.right_pressed = pressed
+                            }
+                            _ => {}
                         }
                     }
-                }
 
-                WindowEvent::MouseInput { state, button, .. } => {
-                    let pressed = state == ElementState::Pressed;
-                    if pressed && egui_ctx.wants_pointer_input() {
-                        return;
-                    }
-                    match button {
-                        MouseButton::Left => left_pressed = pressed,
-                        MouseButton::Right | MouseButton::Middle => right_pressed = pressed,
-                        _ => {}
-                    }
-                }
+                    WindowEvent::CursorMoved { position, .. } => {
+                        if let Some((lx, ly)) = self.last_cursor {
+                            let dx = position.x - lx;
+                            let dy = position.y - ly;
 
-                WindowEvent::CursorMoved { position, .. } => {
-                    if let Some((lx, ly)) = last_cursor {
-                        let dx = position.x - lx;
-                        let dy = position.y - ly;
-
-                        if left_pressed {
-                            camera.orbit(dx as f32, dy as f32);
-                            window.request_redraw();
+                            if self.left_pressed {
+                                self.camera.orbit(dx as f32, dy as f32);
+                                self.window.request_redraw();
+                            }
+                            if self.right_pressed {
+                                self.camera.pan(dx as f32, dy as f32);
+                                self.window.request_redraw();
+                            }
                         }
-                        if right_pressed {
-                            camera.pan(dx as f32, dy as f32);
-                            window.request_redraw();
+                        self.last_cursor = Some((position.x, position.y));
+                    }
+
+                    WindowEvent::MouseWheel { delta, .. } => {
+                        if self.egui_ctx.wants_pointer_input() {
+                            return;
                         }
+                        let scroll = match delta {
+                            MouseScrollDelta::LineDelta(_, y) => y,
+                            MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
+                        };
+                        self.camera.zoom(scroll);
+                        self.window.request_redraw();
                     }
-                    last_cursor = Some((position.x, position.y));
-                }
 
-                WindowEvent::MouseWheel { delta, .. } => {
-                    if egui_ctx.wants_pointer_input() {
-                        return;
+                    WindowEvent::Focused(false) => {
+                        self.left_pressed = false;
+                        self.right_pressed = false;
                     }
-                    let scroll = match delta {
-                        MouseScrollDelta::LineDelta(_, y) => y,
-                        MouseScrollDelta::PixelDelta(p) => p.y as f32 / 50.0,
-                    };
-                    camera.zoom(scroll);
-                    window.request_redraw();
-                }
 
-                WindowEvent::Focused(false) => {
-                    left_pressed = false;
-                    right_pressed = false;
-                }
-
-                WindowEvent::RedrawRequested => {
-                    let raw_input = egui_state.take_egui_input(&window);
-                    let mut scene_left_points = 0.0;
-                    let full_output = egui_ctx.run(raw_input, |ctx| {
+                    WindowEvent::RedrawRequested => {
+                        let raw_input = self.egui_state.take_egui_input(&self.window);
+                        let mut scene_left_points = 0.0;
+                        let full_output = self.egui_ctx.run(raw_input, |ctx| {
                             // ── Top Bar ──────────────────────────────────────────
                             egui::TopBottomPanel::top("top_panel")
                                 .frame(
@@ -415,15 +546,15 @@ fn initialize_viewer(
                                         .on_hover_text("Open an STL, OBJ, or 3MF file from disk (Ctrl+O / O)")
                                         .clicked()
                                         {
-                                            should_open_file = true;
+                                            self.should_open_file = true;
                                         }
 
-                                        if let Some(loading) = &loading_name {
+                                        if let Some(loading) = self.loading_name.as_deref().or_else(|| self.gpu.is_loading().then_some("GPU resources")) {
                                             ui.add_space(6.0);
                                             ui.spinner();
                                             ui.label(
                                                 egui::RichText::new(format!("Loading {loading}..."))
-                                                    .color(if is_dark {
+                                                    .color(if self.is_dark {
                                                         egui::Color32::from_rgb(147, 197, 253)
                                                     } else {
                                                         egui::Color32::from_rgb(37, 99, 235)
@@ -437,17 +568,20 @@ fn initialize_viewer(
                                             |ui| {
                                                 if theme::theme_segmented_control(
                                                     ui,
-                                                    &mut theme_pref,
+                                                    &mut self.theme_pref,
                                                 ) {
-                                                    should_update_theme = true;
+                                                    self.should_update_theme = true;
                                                 }
-                                                theme::projection_segmented_control(ui, &mut camera.orthographic);
-                                                ui.checkbox(&mut gpu.show_edges, "Edges").on_hover_text("Show triangle edges on the shaded model");
-                                                if gpu.msaa_supported {
+                                                theme::projection_segmented_control(ui, &mut self.camera.orthographic);
+                                                if self.gpu.has_animation() && ui.checkbox(&mut self.gpu.animation_paused, "Pause").changed() {
+                                                    self.gpu.reset_animation_clock();
+                                                }
+                                                ui.checkbox(&mut self.gpu.show_edges, "Edges").on_hover_text("Show triangle edges on the shaded model");
+                                                if self.gpu.msaa_supported {
                                                     ui.add_space(10.0);
-                                                    let mut enabled = gpu.sample_count > 1;
+                                                    let mut enabled = self.gpu.sample_count > 1;
                                                     if ui.checkbox(&mut enabled, "4× AA").on_hover_text("Smooth 3D model edges with 4× MSAA").changed() {
-                                                        gpu.set_antialiasing(enabled);
+                                                        self.gpu.set_antialiasing(enabled);
                                                     }
                                                 }
 
@@ -456,9 +590,9 @@ fn initialize_viewer(
                                     });
                                 });
 
-                            if let Some(doc) = &document {
+                            if let Some(doc) = &self.document {
                                 if !doc.plates.is_empty() {
-                                    if plates_collapsed {
+                                    if self.plates_collapsed {
                                         let panel = egui::SidePanel::left("plates_panel_collapsed")
                                             .resizable(false)
                                             .exact_width(24.0)
@@ -480,7 +614,7 @@ fn initialize_viewer(
                                                     egui::TextStyle::Heading.resolve(ui.style()),
                                                     ui.visuals().text_color(),
                                                 );
-                                                if response.clicked() { plates_collapsed = false; }
+                                                if response.clicked() { self.plates_collapsed = false; }
                                             });
                                         scene_left_points = panel.response.rect.right();
                                     } else {
@@ -494,7 +628,7 @@ fn initialize_viewer(
                                             .show(ctx, |ui| {
                                                 let (header, header_response) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), egui::Sense::click());
                                                 if header_response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Minimize plates panel").clicked() {
-                                                    plates_collapsed = true;
+                                                    self.plates_collapsed = true;
                                                 }
                                                 let mut header_ui = ui.new_child(
                                                     egui::UiBuilder::new()
@@ -506,18 +640,18 @@ fn initialize_viewer(
                                                     .on_hover_text("Minimize plates panel")
                                                     .clicked()
                                                 {
-                                                    plates_collapsed = true;
+                                                    self.plates_collapsed = true;
                                                 }
                                                 ui.separator();
                                                 ui.style_mut().spacing.scroll.floating = false;
                                                 ui.style_mut().spacing.scroll.bar_inner_margin = 6.0;
                                                 egui::ScrollArea::vertical().show(ui, |ui| {
-                                                    if plate_tile(ui, "All plates", all_preview.as_ref(), selected_plate.is_none()) {
-                                                        requested_plate = Some(None);
+                                                    if plate_tile(ui, "All plates", self.all_preview.as_ref(), self.selected_plate.is_none()) {
+                                                        self.requested_plate = Some(None);
                                                     }
                                                     for (index, plate) in doc.plates.iter().enumerate() {
-                                                        if plate_tile(ui, &plate.name, plate_previews[index].as_ref(), selected_plate == Some(index)) {
-                                                            requested_plate = Some(Some(index));
+                                                        if plate_tile(ui, &plate.name, self.plate_previews[index].as_ref(), self.selected_plate == Some(index)) {
+                                                            self.requested_plate = Some(Some(index));
                                                         }
                                                     }
                                                 });
@@ -547,7 +681,7 @@ fn initialize_viewer(
                                         ui.with_layout(
                                             egui::Layout::right_to_left(egui::Align::Center),
                                             |ui| {
-                                                if let Some(info) = &file_info {
+                                                if let Some(info) = &self.file_info {
                                                     let color = ui.visuals().widgets.noninteractive.text_color();
                                                     ui.label(egui::RichText::new(format!(
                                                         "{:.1} × {:.1} × {:.1}{}",
@@ -563,25 +697,25 @@ fn initialize_viewer(
                                     });
                                 });
 
-                            if let Some(error) = &error_message {
-                                should_clear_error |= ui::error_popup(ctx, error, bottom_panel.response.rect.height());
+                            if let Some(error) = &self.error_message {
+                                self.should_clear_error |= ui::error_popup(ctx, error, bottom_panel.response.rect.height());
                             }
 
-                            if file_info.is_some() && error_message.is_none() {
-                                ui::orientation_axes(ctx, &mut camera, bottom_panel.response.rect.height());
+                            if self.file_info.is_some() && self.error_message.is_none() {
+                                ui::orientation_axes(ctx, &mut self.camera, bottom_panel.response.rect.height());
                             }
 
-                            if file_info.is_some()
-                                && error_message.is_none()
+                            if self.file_info.is_some()
+                                && self.error_message.is_none()
                                 && ui::reset_view_button(ctx, bottom_panel.response.rect.height())
                             {
-                                should_reset_camera = true;
+                                self.should_reset_camera = true;
                             }
 
                             // ── Welcome Screen (when no model loaded) ────────────
-                            if file_info.is_none() {
+                            if self.file_info.is_none() {
                                 egui::CentralPanel::default()
-                                    .frame(egui::Frame::none().fill(if is_dark { egui::Color32::from_rgb(20, 22, 27) } else { egui::Color32::from_rgb(246, 247, 249) }))
+                                    .frame(egui::Frame::none().fill(if self.is_dark { egui::Color32::from_rgb(20, 22, 27) } else { egui::Color32::from_rgb(246, 247, 249) }))
                                     .show(ctx, |ui| {
                                         let available = ui.available_rect_before_wrap();
                                         let card_w = 380.0_f32;
@@ -619,65 +753,65 @@ fn initialize_viewer(
                                                             let floor = slot.bottom() + 16.0;
                                                             let radius = 51.0_f32;
                                                             let base = egui::pos2(slot.center().x, floor - radius);
-                                                            ui.painter().line_segment([egui::pos2(available.left(), floor), egui::pos2(available.right(), floor)], egui::Stroke::new(1.0_f32, if is_dark { egui::Color32::from_gray(80) } else { egui::Color32::from_gray(190) }));
-                                                            let dt = cube_last_time.elapsed().as_secs_f32().min(0.033);
-                                                            cube_last_time = std::time::Instant::now();
-                                                            if !cube_dragged {
-                                                                cube_velocity.y += 1400.0 * dt;
-                                                                cube_offset += cube_velocity * dt;
-                                                                cube_angle += cube_spin * dt;
-                                                                cube_spin *= (-0.4 * dt).exp();
-                                                                if cube_offset.y >= 0.0 {
-                                                                    cube_offset.y = 0.0;
-                                                                    if cube_velocity.y > 35.0 {
-                                                                        cube_velocity.y *= -0.48;
-                                                                        cube_velocity.x *= 0.8;
-                                                                        cube_spin *= 0.75;
+                                                            ui.painter().line_segment([egui::pos2(available.left(), floor), egui::pos2(available.right(), floor)], egui::Stroke::new(1.0_f32, if self.is_dark { egui::Color32::from_gray(80) } else { egui::Color32::from_gray(190) }));
+                                                            let dt = self.cube_last_time.elapsed().as_secs_f32().min(0.033);
+                                                            self.cube_last_time = std::time::Instant::now();
+                                                            if !self.cube_dragged {
+                                                                self.cube_velocity.y += 1400.0 * dt;
+                                                                self.cube_offset += self.cube_velocity * dt;
+                                                                self.cube_angle += self.cube_spin * dt;
+                                                                self.cube_spin *= (-0.4 * dt).exp();
+                                                                if self.cube_offset.y >= 0.0 {
+                                                                    self.cube_offset.y = 0.0;
+                                                                    if self.cube_velocity.y > 35.0 {
+                                                                        self.cube_velocity.y *= -0.48;
+                                                                        self.cube_velocity.x *= 0.8;
+                                                                        self.cube_spin *= 0.75;
                                                                     } else {
-                                                                        cube_velocity = egui::Vec2::ZERO;
-                                                                        cube_spin = 0.0;
+                                                                        self.cube_velocity = egui::Vec2::ZERO;
+                                                                        self.cube_spin = 0.0;
                                                                     }
                                                                 }
                                                                 let min_x = available.left() + radius - base.x;
                                                                 let max_x = available.right() - radius - base.x;
-                                                                if cube_offset.x < min_x || cube_offset.x > max_x {
-                                                                    cube_offset.x = cube_offset.x.clamp(min_x.min(max_x), max_x.max(min_x));
-                                                                    cube_velocity.x *= -0.5;
+                                                                if self.cube_offset.x < min_x || self.cube_offset.x > max_x {
+                                                                    self.cube_offset.x = self.cube_offset.x.clamp(min_x.min(max_x), max_x.max(min_x));
+                                                                    self.cube_velocity.x *= -0.5;
                                                                 }
                                                                 let top = available.top() + radius - base.y;
-                                                                if cube_offset.y >= top { cube_entered = true; }
-                                                                if cube_entered && cube_offset.y < top {
-                                                                    cube_offset.y = top.min(0.0);
-                                                                    cube_velocity.y = cube_velocity.y.abs() * 0.5;
+                                                                if self.cube_offset.y >= top { self.cube_entered = true; }
+                                                                if self.cube_entered && self.cube_offset.y < top {
+                                                                    self.cube_offset.y = top.min(0.0);
+                                                                    self.cube_velocity.y = self.cube_velocity.y.abs() * 0.5;
                                                                 }
                                                             }
-                                                            let sprite_rect = egui::Rect::from_center_size(base + cube_offset, egui::vec2(72.0, 72.0));
+                                                            let sprite_rect = egui::Rect::from_center_size(base + self.cube_offset, egui::vec2(72.0, 72.0));
                                                             let response = ui.interact(sprite_rect, ui.id().with("bouncing_cube"), egui::Sense::click_and_drag());
                                                             if response.dragged() {
-                                                                cube_dragged = true;
+                                                                self.cube_dragged = true;
                                                                 let delta = ctx.input(|i| i.pointer.delta());
-                                                                cube_offset += delta;
-                                                                cube_offset.y = cube_offset.y.clamp((available.top() + radius - base.y).min(0.0), 0.0);
-                                                                cube_offset.x = cube_offset.x.clamp((available.left() + radius - base.x).min(0.0), (available.right() - radius - base.x).max(0.0));
-                                                                cube_velocity = delta / dt.max(0.001);
-                                                            } else if cube_dragged {
-                                                                cube_dragged = false;
+                                                                self.cube_offset += delta;
+                                                                self.cube_offset.y = self.cube_offset.y.clamp((available.top() + radius - base.y).min(0.0), 0.0);
+                                                                self.cube_offset.x = self.cube_offset.x.clamp((available.left() + radius - base.x).min(0.0), (available.right() - radius - base.x).max(0.0));
+                                                                self.cube_velocity = delta / dt.max(0.001);
+                                                            } else if self.cube_dragged {
+                                                                self.cube_dragged = false;
                                                             }
                                                             if response.clicked() {
                                                                 let hit = response.interact_pointer_pos().unwrap_or(sprite_rect.center()) - sprite_rect.center();
-                                                                cube_velocity.x += -hit.x * 10.0;
-                                                                cube_velocity.y = -650.0;
-                                                                cube_spin += hit.x * 0.16;
+                                                                self.cube_velocity.x += -hit.x * 10.0;
+                                                                self.cube_velocity.y = -650.0;
+                                                                self.cube_spin += hit.x * 0.16;
                                                             }
-                                                            let center = base + cube_offset;
-                                                            let mut mesh = egui::Mesh::with_texture(cube_texture.id());
-                                                            let (sin, cos) = cube_angle.sin_cos();
+                                                            let center = base + self.cube_offset;
+                                                            let mut mesh = egui::Mesh::with_texture(self.cube_texture.id());
+                                                            let (sin, cos) = self.cube_angle.sin_cos();
                                                             for (x, y, u, v) in [(-36.0, -36.0, 0.0, 0.0), (36.0, -36.0, 1.0, 0.0), (36.0, 36.0, 1.0, 1.0), (-36.0, 36.0, 0.0, 1.0)] {
                                                                 mesh.vertices.push(egui::epaint::Vertex { pos: center + egui::vec2(x * cos - y * sin, x * sin + y * cos), uv: egui::pos2(u, v), color: egui::Color32::WHITE });
                                                             }
                                                             mesh.indices.extend_from_slice(&[0, 1, 2, 0, 2, 3]);
                                                             ui.painter().with_clip_rect(available).add(egui::Shape::mesh(mesh));
-                                                            if cube_dragged || cube_offset.y < 0.0 || cube_velocity != egui::Vec2::ZERO || cube_spin.abs() > 0.01 {
+                                                            if self.cube_dragged || self.cube_offset.y < 0.0 || self.cube_velocity != egui::Vec2::ZERO || self.cube_spin.abs() > 0.01 {
                                                                 ctx.request_repaint();
                                                             }
                                                             ui.add_space(32.0);
@@ -693,7 +827,7 @@ fn initialize_viewer(
                                                             );
                                                             ui.add_space(20.0);
 
-                                                            if let Some(loading) = &loading_name {
+                                                            if let Some(loading) = self.loading_name.as_deref().or_else(|| self.gpu.is_loading().then_some("GPU resources")) {
                                                                 ui.spinner();
                                                                 ui.add_space(8.0);
                                                                 ui.label(format!("Loading {loading}..."));
@@ -713,7 +847,7 @@ fn initialize_viewer(
                                                                 .on_hover_text("Open file dialog (Ctrl+O / O)")
                                                                 .clicked()
                                                                 {
-                                                                    should_open_file = true;
+                                                                    self.should_open_file = true;
                                                                 }
 
                                                                 ui.add_space(14.0);
@@ -739,78 +873,97 @@ fn initialize_viewer(
                             }
                         });
 
-                    egui_state.handle_platform_output(&window, full_output.platform_output);
+                        let delay = full_output
+                            .viewport_output
+                            .get(&egui::ViewportId::ROOT)
+                            .map_or(std::time::Duration::MAX, |output| output.repaint_delay);
+                        self.repaint.after_frame(std::time::Instant::now(), delay);
 
-                    if let Some(selection) = requested_plate.take() {
-                        selected_plate = selection;
-                        if let (Some(doc), Some(info)) = (&document, &mut file_info) {
-                            let mesh = selection
-                                .map(|index| &doc.plates[index].mesh)
-                                .unwrap_or(&doc.mesh);
-                            gpu.load_mesh(mesh);
-                            info.geometry_summary = geometry_summary(mesh);
-                            info.dimensions = mesh.dimensions();
-                            info.center = mesh.center();
-                            info.extent = mesh.extent();
-                            camera.frame_target(info.center, info.extent);
+                        self.egui_state
+                            .handle_platform_output(&self.window, full_output.platform_output);
+
+                        if let Some(selection) = self
+                            .requested_plate
+                            .take()
+                            .filter(|_| self.loading_name.is_none())
+                        {
+                            self.selected_plate = selection;
+                            if let (Some(doc), Some(info)) = (&self.document, &mut self.file_info) {
+                                let mesh = selection
+                                    .map(|index| &doc.plates[index].mesh)
+                                    .unwrap_or(&doc.mesh);
+                                self.gpu.load_mesh(mesh);
+                                info.geometry_summary = geometry_summary(mesh);
+                                info.dimensions = mesh.dimensions();
+                                info.center = mesh.center();
+                                info.extent = mesh.extent();
+                                self.camera.frame_target(info.center, info.extent);
+                            }
+                            self.window.request_redraw();
                         }
-                        window.request_redraw();
-                    }
 
-                    if should_update_theme {
-                        should_update_theme = false;
-                        let new_is_dark = theme_pref.is_dark(system_is_dark);
-                        if new_is_dark != is_dark {
-                            is_dark = new_is_dark;
-                            theme::apply_theme(&egui_ctx, is_dark);
+                        if self.should_update_theme {
+                            self.should_update_theme = false;
+                            let new_is_dark = self.theme_pref.is_dark(self.system_is_dark);
+                            if new_is_dark != self.is_dark {
+                                self.is_dark = new_is_dark;
+                                theme::apply_theme(&self.egui_ctx, self.is_dark);
+                            }
+                            self.window.request_redraw();
                         }
-                        window.request_redraw();
-                    }
 
-                    let scene_left =
-                        (scene_left_points * full_output.pixels_per_point).round() as u32;
-                    camera.aspect = (gpu.config.width.saturating_sub(scene_left).max(1)) as f32
-                        / gpu.config.height.max(1) as f32;
-                    gpu.render(
-                        &camera,
-                        &egui_ctx,
-                        full_output.shapes,
-                        &full_output.textures_delta,
-                        full_output.pixels_per_point,
-                        scene_left,
-                        is_dark,
-                    );
+                        let scene_left =
+                            (scene_left_points * full_output.pixels_per_point).round() as u32;
+                        self.camera.aspect =
+                            (self.gpu.config.width.saturating_sub(scene_left).max(1)) as f32
+                                / self.gpu.config.height.max(1) as f32;
+                        self.gpu.render(
+                            &self.camera,
+                            &self.egui_ctx,
+                            full_output.shapes,
+                            &full_output.textures_delta,
+                            full_output.pixels_per_point,
+                            scene_left,
+                            self.is_dark,
+                        );
 
-                    if should_open_file {
-                        should_open_file = false;
-                        spawn_open_dialog(proxy.clone());
-                    }
-
-                    if should_reset_camera {
-                        should_reset_camera = false;
-                        if let Some(info) = &file_info {
-                            camera.frame_target(info.center, info.extent);
+                        if self.should_open_file {
+                            self.should_open_file = false;
+                            self.loader.spawn_open_dialog(self.proxy.clone());
                         }
-                        window.request_redraw();
+
+                        if self.should_reset_camera {
+                            self.should_reset_camera = false;
+                            if let Some(info) = &self.file_info {
+                                self.camera.frame_target(info.center, info.extent);
+                            }
+                            self.window.request_redraw();
+                        }
+
+                        if self.should_clear_error {
+                            self.should_clear_error = false;
+                            self.error_message = None;
+                            self.window.request_redraw();
+                        }
                     }
 
-                    if should_clear_error {
-                        should_clear_error = false;
-                        error_message = None;
-                        window.request_redraw();
-                    }
+                    _ => {}
                 }
-
-                _ => {}
             }
-        }
 
-        Event::AboutToWait if egui_ctx.has_requested_repaint() || gpu.is_animated() => {
-            window.request_redraw();
-        }
+            Event::AboutToWait => {
+                let (redraw, flow) = self
+                    .repaint
+                    .next(std::time::Instant::now(), self.gpu.is_animated());
+                elwt.set_control_flow(flow);
+                if redraw {
+                    self.window.request_redraw();
+                }
+            }
 
-        _ => {}
-    }))
+            _ => {}
+        }
+    }
 }
 
 fn geometry_summary(mesh: &mesh::Mesh) -> String {

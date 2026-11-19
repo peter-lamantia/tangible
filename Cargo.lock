@@ -2677,6 +2677,7 @@ dependencies = [
 name = "tangible"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "bytemuck",
  "egui",
  "egui-wgpu",
@@ -2685,11 +2686,13 @@ dependencies = [
  "env_logger",
  "glam",
  "gltf",
+ "image",
  "log",
  "ply-rs",
  "pollster 0.3.0",
  "quick-xml",
  "rfd",
+ "urlencoding",
  "wgpu",
  "winit",
  "zip",

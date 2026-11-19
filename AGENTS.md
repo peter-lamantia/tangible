@@ -1,14 +1,30 @@
 # Agent guide
 
-Tangible is a Rust desktop viewer for STL, OBJ, and 3MF models. Keep changes focused and preserve existing user changes.
+Tangible is a Rust desktop viewer for STL, OBJ, 3MF, OFF, PLY, glTF, and GLB models. Keep changes focused and preserve existing user changes.
 
 ## Project map
 
-- `src/main.rs`: window, application state, GPU rendering, and UI.
-- `src/model.rs`: OBJ and 3MF loading, including plate metadata.
-- `src/stl.rs`: STL loading and mesh representation.
-- `src/camera.rs`: camera behavior; `src/shader.wgsl`: rendering shader.
-- `src/theme.rs`: UI theme and controls; `assets/` contains bundled artwork and fonts. See `assets/ARTWORK.md` for attribution.
+- `src/main.rs`: window lifecycle, explicit viewer state, input, and UI composition.
+- `src/renderer.rs`: GPU resources, material packing, geometry caching, and rendering.
+- `src/model.rs`: document loading and explicit loading-context entry point.
+- `src/model/`: format loaders, glTF animation, legacy conversion, and resource budgets.
+- `src/mesh.rs`: shared geometry, typed materials/topologies, validation, and scoped cancellation bridge.
+- `src/loading.rs`: viewer-owned worker, request contexts, and progressive preview delivery.
+- `src/preview.rs`: cancellable CPU plate previews.
+- `src/stl.rs`: STL parsing; `src/camera.rs`: camera behavior.
+- `src/repaint.rs`: deadline-based redraw scheduling for idle efficiency.
+- `src/preferences.rs`: platform-specific preference storage.
+- `src/ui.rs` and `src/theme.rs`: UI helpers and styling; `src/shader.wgsl`: shader.
+- `src/renderer/sample_tests.rs`: optional offscreen sample-model GPU checks.
+- `assets/`: bundled artwork and fonts. See `assets/ARTWORK.md` for attribution.
+
+Keep material factors in draw batches rather than duplicating them per vertex.
+Convert typed alpha modes to shader encodings only in the renderer. Animated meshes
+use reusable, non-indexed GPU buffers; static meshes use bounded deduplication.
+Keep geometry deduplication and GPU buffer/texture preparation off the UI thread.
+Upload completions must match the current revision before replacing the scene.
+Honor egui repaint deadlines; delayed requests must not cause continuous redraws.
+The loading context scope must restore the previous context on errors and unwinds.
 
 ## Development and checks
 

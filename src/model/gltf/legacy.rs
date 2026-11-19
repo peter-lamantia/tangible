@@ -355,7 +355,7 @@ mod tests {
         assert_eq!(mesh.vertices.len(), 3);
         assert_eq!(mesh.vertices[0].position, [2., 0., 0.]);
         assert_eq!(mesh.vertices[0].color, [1., 0., 0., 1.]);
-        assert_eq!(mesh.vertices[0].surface[0], 0.);
+        assert_eq!(mesh.batches[0].material.metallic, 0.);
         // The v1 binary image extension uses named bufferViews, not v2 indices.
         let mut root = root;
         let mut body = body;

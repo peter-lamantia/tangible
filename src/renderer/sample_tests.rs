@@ -300,6 +300,7 @@ fn render(
             pass.set_pipeline(&pipelines[chunk.topology]);
             pass.set_bind_group(1, &textures[chunk.texture], &[]);
             pass.set_vertex_buffer(0, chunk.vertices.slice(..));
+            pass.set_vertex_buffer(1, chunk.material.slice(..));
             if let Some(indices) = &chunk.indices {
                 pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..chunk.count, 0, 0..1);

@@ -12,10 +12,13 @@ A simple, cross-platform STL, OBJ, 3MF, OFF, PLY, glTF, and GLB file viewer writ
 - **GUI File Opening** — native file dialog (`rfd`), top bar button, and drag-and-drop
 - **GPU-accelerated** — uses `wgpu` (Vulkan / Metal / DX12)
 - **STL, OBJ, 3MF, OFF, PLY, glTF & GLB** — geometry from common 3D model formats. glTF/GLB displays base-color, metallic/roughness, normal, occlusion, and emissive textures with separate UV sets; vertex colors; unlit materials; UV transforms; triangle/line/point primitives, skinned meshes, and morph targets. The first animation plays automatically in a loop (translation, rotation, and scale; step, linear, and cubic spline interpolation).
+- **Idle rendering** — static models redraw on interaction and scheduled UI updates; the event loop sleeps between updates. Playing glTF animations continue rendering until paused.
 - **Antialiasing** — 4× MSAA enabled by default on supported GPUs
 - **3MF plate selection** — shaded square previews for all plates and each individual plate, with a resizable and collapsible panel
-- **Responsive loading** — background parsing and progressive plate previews; the most recently opened file takes priority
+- **Responsive loading** — background parsing, GPU preparation, and progressive plate previews; the most recently opened file takes priority
 - **Model details** — displays filename, triangle/vertex counts, and bounding box dimensions
+- **Playback controls** — pause and resume the first glTF animation with the Pause checkbox
+- **Saved preferences** — theme, projection, and window size are restored after closing normally
 - **Projection toggle** — switch between Perspective and Orthographic using the segmented control beside the theme selector
 
 ## Usage
@@ -87,9 +90,9 @@ packages (on Debian/Ubuntu: `libwayland-dev libxkbcommon-dev libgtk-3-dev`).
 
 Model loaders build render geometry directly to reduce temporary memory use. PLY streams records from disk; glTF/GLB loads geometry buffers and referenced material textures. Large meshes still require CPU geometry and GPU storage.
 
-Models support up to 10 million expanded triangles. Large models are uploaded in GPU buffer chunks; memory use still scales with triangle count.
+Models support up to 10 million expanded triangles. Large models are uploaded in GPU buffer chunks on a background worker; memory use still scales with triangle count. The current model remains visible until the replacement GPU resources are ready. Superseded uploads stop between chunks or textures, and the loading indicator stays visible through GPU preparation.
 
-Large-model performance: mesh copies share immutable vertex storage. The renderer uses indexed geometry when it reduces upload size and caches up to two recently viewed meshes of at most 32 MiB each. Plate thumbnails retain four-sample antialiasing with incremental rasterization. Release builds enable thin LTO.
+Large-model performance: mesh copies share immutable vertex storage. The renderer samples large vertex chunks without source indices before attempting deduplication. It keeps indexed geometry when it reduces upload size and caches up to two recently viewed meshes of at most 32 MiB each. Plate thumbnails retain four-sample antialiasing with incremental rasterization. Release builds enable thin LTO.
 
 ## glTF regression tests
 
@@ -121,7 +124,7 @@ Authored tangent vectors and their handedness are preserved through skinning,
 morphing, and mirrored transforms; meshes without tangents derive a basis from UVs.
 Other material extensions, environment lighting, mipmaps, and animation selection
 controls are not yet supported. Texture dimensions are limited to 8192 pixels;
-animation currently evaluates and uploads geometry on the CPU, so large animated
+animation currently evaluates geometry on the CPU and updates reusable GPU buffers, so large animated
 models can be expensive.
 
 To repeat the 20-model GPU rendering check against a local Khronos checkout:
@@ -148,3 +151,36 @@ their original relative locations. Missing-buffer errors identify the resource
 and its base directory. Use the `.glb` variant for a bundled model file.
 Load errors appear in a scrollable popup at the bottom right, with buttons to
 copy the full message or dismiss it.
+
+## Resource use and measurements
+
+Material factors are shared per draw batch; vertices occupy 96 bytes rather than
+132 bytes. Static geometry uses bounded GPU deduplication. glTF retains source accessor
+indices to avoid hashing all vertex attributes when building GPU index buffers. Animated geometry
+keeps stable non-indexed GPU buffers and updates their contents each frame.
+CPU animation evaluation still allocates geometry each frame.
+
+glTF companion buffers, encoded image resources, and decoded RGBA images share a
+512 MiB budget. Image decoding limits dimensions to 8192 pixels and applies the
+remaining allocation budget. Cancellation is checked between resource imports.
+
+Preferences are saved on normal window close in `tangible/preferences` beneath
+`%APPDATA%` on Windows, `~/Library/Application Support` on macOS, and
+`$XDG_CONFIG_HOME` (or `~/.config`) on Linux.
+
+To measure parsing time, resident geometry/texture bytes, and average CPU animation
+evaluation time for local representative files:
+
+```bash
+TANGIBLE_BENCH_MODELS='/path/model.stl:/path/model.glb' \
+  cargo test --release --locked benchmark_models -- --ignored --nocapture
+```
+
+Use semicolons between paths on Windows. These figures report geometry storage,
+not peak process memory. On Linux, wrap the command with `/usr/bin/time -v` to
+also inspect maximum resident memory. Use the offscreen GPU checks above to
+validate rendering separately.
+
+Set `RUST_LOG=tangible=debug` when running the viewer to log background GPU preparation and
+CPU frame submission durations. These timings include CPU preparation and queue
+submission, not completed GPU execution time.

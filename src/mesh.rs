@@ -8,13 +8,8 @@ pub struct Vertex {
     pub normal: [f32; 3],
     pub color: [f32; 4],
     pub uv: [f32; 2],
-    /// Metallic, roughness, alpha cutoff (-2: opaque, -1: blend), unlit.
-    pub surface: [f32; 4],
-    pub emissive: [f32; 3],
     /// UVs for metallic/roughness, normal, occlusion, and emissive maps.
     pub map_uv: [[f32; 2]; 4],
-    /// Normal scale and occlusion strength.
-    pub map_factors: [f32; 2],
     /// World-space tangent and bitangent handedness; zero means derive from UVs.
     pub tangent: [f32; 4],
 }
@@ -26,11 +21,46 @@ impl Default for Vertex {
             normal: [0.; 3],
             color: [0.7, 0.75, 0.8, 1.],
             uv: [0.; 2],
-            surface: [0., 0.5, -1., 0.],
-            emissive: [0.; 3],
             map_uv: [[0.; 2]; 4],
-            map_factors: [0., 1.],
             tangent: [0.; 4],
+        }
+    }
+}
+
+/// Alpha behavior is converted to the shader representation only at upload.
+#[derive(Debug, Clone, Copy)]
+pub enum AlphaMode {
+    Opaque,
+    Blend,
+    Mask(f32),
+}
+impl AlphaMode {
+    #[cfg(test)]
+    pub fn cutoff(self) -> f32 {
+        match self {
+            Self::Mask(value) => value,
+            _ => panic!("Expected masked material"),
+        }
+    }
+}
+#[derive(Debug, Clone, Copy)]
+pub struct Material {
+    pub metallic: f32,
+    pub roughness: f32,
+    pub alpha: AlphaMode,
+    pub unlit: bool,
+    pub emissive: [f32; 3],
+    pub map_factors: [f32; 2],
+}
+impl Default for Material {
+    fn default() -> Self {
+        Self {
+            metallic: 0.,
+            roughness: 0.5,
+            alpha: AlphaMode::Blend,
+            unlit: false,
+            emissive: [0.; 3],
+            map_factors: [0., 1.],
         }
     }
 }
@@ -43,10 +73,21 @@ pub struct Texture {
     pub wrap: [u32; 2],
     pub linear: [bool; 2],
 }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Topology {
+    Triangles,
+    Lines,
+    Points,
+}
+
 #[derive(Debug, Clone)]
 pub struct Batch {
+    /// Original accessor indices in expanded draw order, when provided by the loader.
+    pub source_indices: Option<std::sync::Arc<Vec<u32>>>,
+    pub material: Material,
     pub range: std::ops::Range<usize>,
-    pub topology: u8, // 0: triangles, 1: lines, 2: points
+    pub topology: Topology,
     pub texture: Option<usize>,
     pub maps: [Option<usize>; 4],
     pub double_sided: bool,
@@ -110,16 +151,19 @@ pub const MAX_TRIANGLES: usize = 10_000_000;
 pub const MAX_INPUT_BYTES: u64 = 512 * 1024 * 1024;
 pub type MeshResult<T> = Result<T, Box<dyn std::error::Error>>;
 
-thread_local! { static REQUEST_ID: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) }; }
-pub(crate) fn set_request_id(id: u64) {
-    REQUEST_ID.with(|r| r.set(Some(id)));
+// Scope restores the previous context, including when parsing fails or unwinds.
+thread_local! { static LOAD_CONTEXT: std::cell::RefCell<crate::loading::LoadContext> = std::cell::RefCell::new(Default::default()); }
+pub(crate) struct LoadingScope(crate::loading::LoadContext);
+pub(crate) fn loading_scope(context: crate::loading::LoadContext) -> LoadingScope {
+    LoadingScope(LOAD_CONTEXT.with(|current| current.replace(context)))
+}
+impl Drop for LoadingScope {
+    fn drop(&mut self) {
+        LOAD_CONTEXT.with(|current| current.replace(self.0.clone()));
+    }
 }
 pub(crate) fn check_cancelled() -> MeshResult<()> {
-    if REQUEST_ID.with(|r| r.get().is_some_and(|id| !crate::loading::is_current(id))) {
-        Err("Loading cancelled".into())
-    } else {
-        Ok(())
-    }
+    LOAD_CONTEXT.with(|context| context.borrow().check())
 }
 
 pub fn read_limited(path: &std::path::Path) -> MeshResult<Vec<u8>> {

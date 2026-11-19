@@ -10,7 +10,7 @@ fn main() {
     let resource = out_dir.join("app-icon.rc");
     fs::copy("assets/app-icon.ico", out_dir.join("app-icon.ico"))
         .expect("Failed to stage the Windows application icon");
-    fs::write(&resource, "1 ICON \"app-icon.ico\"\n")
+    fs::write(&resource, "101 ICON \"app-icon.ico\"\n")
         .expect("Failed to write the Windows resource script");
     embed_resource::compile(&resource, embed_resource::NONE)
         .manifest_required()

@@ -1,6 +1,11 @@
+use crate::loading::AppEvent;
 use crate::{camera, mesh, theme};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    mpsc, Arc,
+};
 use wgpu::util::DeviceExt;
+use winit::event_loop::EventLoopProxy;
 use winit::window::Window;
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -18,8 +23,36 @@ struct Uniforms {
     edges: f32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct PackedMaterial {
+    surface: [f32; 4],
+    emissive: [f32; 3],
+    map_factors: [f32; 2],
+}
+impl From<mesh::Material> for PackedMaterial {
+    fn from(material: mesh::Material) -> Self {
+        Self {
+            surface: [
+                material.metallic,
+                material.roughness,
+                match material.alpha {
+                    mesh::AlphaMode::Opaque => -2.,
+                    mesh::AlphaMode::Blend => -1.,
+                    mesh::AlphaMode::Mask(cutoff) => cutoff,
+                },
+                f32::from(material.unlit),
+            ],
+            emissive: material.emissive,
+            map_factors: material.map_factors,
+        }
+    }
+}
+
+#[derive(Debug)]
 struct GeometryChunk {
     vertices: wgpu::Buffer,
+    material: wgpu::Buffer,
     indices: Option<wgpu::Buffer>,
     count: u32,
     topology: usize,
@@ -28,16 +61,117 @@ struct GeometryChunk {
     center: glam::Vec3,
 }
 
+#[derive(Debug)]
+pub(crate) struct PreparedMesh {
+    revision: u64,
+    mesh: mesh::Mesh,
+    geometry: Vec<GeometryChunk>,
+    textures: Vec<wgpu::BindGroup>,
+}
+struct UploadJob {
+    revision: u64,
+    mesh: mesh::Mesh,
+    cached: Option<Vec<GeometryChunk>>,
+}
+
+struct UploadWorker {
+    jobs: mpsc::Sender<UploadJob>,
+    latest: Arc<AtomicU64>,
+}
+impl UploadWorker {
+    fn new(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        layout: Arc<wgpu::BindGroupLayout>,
+        proxy: EventLoopProxy<AppEvent>,
+    ) -> Self {
+        Self::with_delivery(device, queue, layout, move |prepared| {
+            proxy.send_event(AppEvent::GpuUploadReady(prepared)).is_ok()
+        })
+    }
+    fn with_delivery(
+        device: Arc<wgpu::Device>,
+        queue: Arc<wgpu::Queue>,
+        layout: Arc<wgpu::BindGroupLayout>,
+        deliver: impl Fn(PreparedMesh) -> bool + Send + 'static,
+    ) -> Self {
+        let (jobs, receiver) = mpsc::channel::<UploadJob>();
+        let latest = Arc::new(AtomicU64::new(0));
+        let current = latest.clone();
+        std::thread::spawn(move || {
+            while let Ok(mut job) = receiver.recv() {
+                // Keep only the newest queued mesh (including rapid plate changes).
+                while let Ok(next) = receiver.try_recv() {
+                    job = next;
+                }
+                let is_current = || current.load(Ordering::SeqCst) == job.revision;
+                if !is_current() {
+                    continue;
+                }
+                let upload_start = std::time::Instant::now();
+                let geometry = match job.cached {
+                    Some(geometry) => geometry,
+                    None => match GpuState::create_vertex_buffers_cancellable(
+                        &device, &job.mesh, is_current,
+                    ) {
+                        Some(geometry) => geometry,
+                        None => continue,
+                    },
+                };
+                let Some(textures) = GpuState::create_textures_cancellable(
+                    &device, &queue, &layout, &job.mesh, is_current,
+                ) else {
+                    continue;
+                };
+                if !is_current() {
+                    continue;
+                }
+                // Flush texture writes here rather than leaving their submission to the UI.
+                queue.submit([]);
+                log::debug!(
+                    "Background geometry/texture preparation: {:?} ({:.1} MiB of vertex and index buffers, {} indexed chunks out of {})",
+                    upload_start.elapsed(),
+                    geometry.iter().map(|chunk| chunk.vertices.size() + chunk.indices.as_ref().map_or(0, wgpu::Buffer::size)).sum::<u64>() as f64 / (1024. * 1024.),
+                    geometry.iter().filter(|chunk| chunk.indices.is_some()).count(),
+                    geometry.len()
+                );
+                let prepared = PreparedMesh {
+                    revision: job.revision,
+                    mesh: job.mesh,
+                    geometry,
+                    textures,
+                };
+                if !deliver(prepared) {
+                    break;
+                }
+            }
+        });
+        Self { jobs, latest }
+    }
+    fn cancel(&self) {
+        self.latest.fetch_add(1, Ordering::SeqCst);
+    }
+}
+impl Drop for UploadWorker {
+    fn drop(&mut self) {
+        self.cancel();
+    }
+}
+
 pub(crate) struct GpuState {
     surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     pub(crate) config: wgpu::SurfaceConfiguration,
     pipeline: Vec<wgpu::RenderPipeline>,
-    texture_layout: wgpu::BindGroupLayout,
+    texture_layout: Arc<wgpu::BindGroupLayout>,
+    upload_worker: UploadWorker,
+    uploading: bool,
     textures: Vec<wgpu::BindGroup>,
     animation: Option<Arc<crate::model::gltf::Scene>>,
-    animation_start: std::time::Instant,
+    pub(crate) animation_paused: bool,
+    animation_time: f32,
+    last_animation_frame: std::time::Instant,
     vertex_buffers: Vec<GeometryChunk>,
     mesh_storage: Arc<Vec<mesh::Vertex>>,
     geometry_cache: std::collections::VecDeque<(Arc<Vec<mesh::Vertex>>, Vec<GeometryChunk>)>,
@@ -55,7 +189,11 @@ pub(crate) struct GpuState {
 }
 
 impl GpuState {
-    pub(crate) fn new(window: Arc<Window>, mesh: &mesh::Mesh) -> Result<Self, String> {
+    pub(crate) fn new(
+        window: Arc<Window>,
+        mesh: &mesh::Mesh,
+        proxy: EventLoopProxy<AppEvent>,
+    ) -> Result<Self, String> {
         let size = window.inner_size();
 
         // ── Instance + Surface + Adapter + Device ────────────────────────
@@ -87,6 +225,9 @@ impl GpuState {
             None,
         ))
         .map_err(|e| format!("Could not initialize graphics device: {e}"))?;
+
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
 
         // ── Surface config ───────────────────────────────────────────────
         let caps = surface.get_capabilities(&adapter);
@@ -162,7 +303,7 @@ impl GpuState {
             }],
         });
 
-        let texture_layout = Self::texture_bind_group_layout(&device);
+        let texture_layout = Arc::new(Self::texture_bind_group_layout(&device));
         let textures = Self::create_textures(&device, &queue, &texture_layout, mesh);
         let sample_count = 1;
         let pipeline = Self::create_pipeline(
@@ -178,6 +319,8 @@ impl GpuState {
 
         let egui_renderer = egui_wgpu::Renderer::new(&device, config.format, None, 1, false);
 
+        let upload_worker =
+            UploadWorker::new(device.clone(), queue.clone(), texture_layout.clone(), proxy);
         Ok(Self {
             surface,
             device,
@@ -185,9 +328,13 @@ impl GpuState {
             config,
             pipeline,
             texture_layout,
+            upload_worker,
+            uploading: false,
             textures,
             animation: mesh.animation.clone(),
-            animation_start: std::time::Instant::now(),
+            animation_paused: false,
+            animation_time: 0.,
+            last_animation_frame: std::time::Instant::now(),
             vertex_buffers,
             mesh_storage: mesh.vertices.clone(),
             geometry_cache: Default::default(),
@@ -233,72 +380,80 @@ impl GpuState {
                     vertex: wgpu::VertexState {
                         module: shader,
                         entry_point: "vs_main",
-                        buffers: &[wgpu::VertexBufferLayout {
-                            array_stride: std::mem::size_of::<mesh::Vertex>() as u64,
-                            step_mode: wgpu::VertexStepMode::Vertex,
-                            attributes: &[
-                                wgpu::VertexAttribute {
-                                    offset: 116,
-                                    shader_location: 11,
-                                    format: wgpu::VertexFormat::Float32x4,
-                                },
-                                wgpu::VertexAttribute {
-                                    offset: 76,
-                                    shader_location: 6,
-                                    format: wgpu::VertexFormat::Float32x2,
-                                },
-                                wgpu::VertexAttribute {
-                                    offset: 84,
-                                    shader_location: 7,
-                                    format: wgpu::VertexFormat::Float32x2,
-                                },
-                                wgpu::VertexAttribute {
-                                    offset: 92,
-                                    shader_location: 8,
-                                    format: wgpu::VertexFormat::Float32x2,
-                                },
-                                wgpu::VertexAttribute {
-                                    offset: 100,
-                                    shader_location: 9,
-                                    format: wgpu::VertexFormat::Float32x2,
-                                },
-                                wgpu::VertexAttribute {
-                                    offset: 108,
-                                    shader_location: 10,
-                                    format: wgpu::VertexFormat::Float32x2,
-                                },
-                                wgpu::VertexAttribute {
-                                    offset: 24,
-                                    shader_location: 2,
-                                    format: wgpu::VertexFormat::Float32x4,
-                                },
-                                wgpu::VertexAttribute {
-                                    offset: 40,
-                                    shader_location: 3,
-                                    format: wgpu::VertexFormat::Float32x2,
-                                },
-                                wgpu::VertexAttribute {
-                                    offset: 48,
-                                    shader_location: 4,
-                                    format: wgpu::VertexFormat::Float32x4,
-                                },
-                                wgpu::VertexAttribute {
-                                    offset: 64,
-                                    shader_location: 5,
-                                    format: wgpu::VertexFormat::Float32x3,
-                                },
-                                wgpu::VertexAttribute {
-                                    offset: 0,
-                                    shader_location: 0,
-                                    format: wgpu::VertexFormat::Float32x3,
-                                },
-                                wgpu::VertexAttribute {
-                                    offset: 12,
-                                    shader_location: 1,
-                                    format: wgpu::VertexFormat::Float32x3,
-                                },
-                            ],
-                        }],
+                        buffers: &[
+                            wgpu::VertexBufferLayout {
+                                array_stride: std::mem::size_of::<mesh::Vertex>() as u64,
+                                step_mode: wgpu::VertexStepMode::Vertex,
+                                attributes: &[
+                                    wgpu::VertexAttribute {
+                                        offset: 0,
+                                        shader_location: 0,
+                                        format: wgpu::VertexFormat::Float32x3,
+                                    },
+                                    wgpu::VertexAttribute {
+                                        offset: 12,
+                                        shader_location: 1,
+                                        format: wgpu::VertexFormat::Float32x3,
+                                    },
+                                    wgpu::VertexAttribute {
+                                        offset: 24,
+                                        shader_location: 2,
+                                        format: wgpu::VertexFormat::Float32x4,
+                                    },
+                                    wgpu::VertexAttribute {
+                                        offset: 40,
+                                        shader_location: 3,
+                                        format: wgpu::VertexFormat::Float32x2,
+                                    },
+                                    wgpu::VertexAttribute {
+                                        offset: 48,
+                                        shader_location: 6,
+                                        format: wgpu::VertexFormat::Float32x2,
+                                    },
+                                    wgpu::VertexAttribute {
+                                        offset: 56,
+                                        shader_location: 7,
+                                        format: wgpu::VertexFormat::Float32x2,
+                                    },
+                                    wgpu::VertexAttribute {
+                                        offset: 64,
+                                        shader_location: 8,
+                                        format: wgpu::VertexFormat::Float32x2,
+                                    },
+                                    wgpu::VertexAttribute {
+                                        offset: 72,
+                                        shader_location: 9,
+                                        format: wgpu::VertexFormat::Float32x2,
+                                    },
+                                    wgpu::VertexAttribute {
+                                        offset: 80,
+                                        shader_location: 11,
+                                        format: wgpu::VertexFormat::Float32x4,
+                                    },
+                                ],
+                            },
+                            wgpu::VertexBufferLayout {
+                                array_stride: std::mem::size_of::<PackedMaterial>() as u64,
+                                step_mode: wgpu::VertexStepMode::Instance,
+                                attributes: &[
+                                    wgpu::VertexAttribute {
+                                        offset: 0,
+                                        shader_location: 4,
+                                        format: wgpu::VertexFormat::Float32x4,
+                                    },
+                                    wgpu::VertexAttribute {
+                                        offset: 16,
+                                        shader_location: 5,
+                                        format: wgpu::VertexFormat::Float32x3,
+                                    },
+                                    wgpu::VertexAttribute {
+                                        offset: 28,
+                                        shader_location: 10,
+                                        format: wgpu::VertexFormat::Float32x2,
+                                    },
+                                ],
+                            },
+                        ],
                         compilation_options: Default::default(),
                     },
                     fragment: Some(wgpu::FragmentState {
@@ -343,12 +498,21 @@ impl GpuState {
     }
 
     fn create_vertex_buffers(device: &wgpu::Device, mesh: &mesh::Mesh) -> Vec<GeometryChunk> {
+        Self::create_vertex_buffers_cancellable(device, mesh, || true).unwrap()
+    }
+    fn create_vertex_buffers_cancellable(
+        device: &wgpu::Device,
+        mesh: &mesh::Mesh,
+        is_current: impl Fn() -> bool,
+    ) -> Option<Vec<GeometryChunk>> {
         // Bound temporary deduplication memory as well as device buffer sizes.
         let chunk_size = vertex_chunk_size(device.limits().max_buffer_size).min(196_608);
         let batches = if mesh.batches.is_empty() {
             vec![mesh::Batch {
                 range: 0..mesh.vertices.len(),
-                topology: 0,
+                source_indices: None,
+                material: Default::default(),
+                topology: mesh::Topology::Triangles,
                 texture: None,
                 maps: [None; 4],
                 double_sided: true,
@@ -363,18 +527,29 @@ impl GpuState {
             .flat_map(|(batch_index, batch)| {
                 mesh.vertices[batch.range.clone()]
                     .chunks(chunk_size)
-                    .map(move |vertices| (batch_index, batch, vertices))
+                    .enumerate()
+                    .map(move |(i, vertices)| (batch_index, batch, vertices, i * chunk_size))
             })
-            .map(|(batch_index, batch, vertices)| {
-                let (unique, indices) = indexed_vertices(vertices);
-                let indexed = unique.len() * std::mem::size_of::<mesh::Vertex>()
-                    + indices.len() * 4
-                    < std::mem::size_of_val(vertices);
+            .map(|(batch_index, batch, vertices, offset)| {
+                if !is_current() {
+                    return None;
+                }
+                let (unique, indices) = if mesh.animation.is_some() {
+                    (Vec::new(), Vec::new())
+                } else if let Some(source) = &batch.source_indices {
+                    indexed_source_vertices(vertices, &source[offset..offset + vertices.len()])
+                } else if should_deduplicate(vertices) {
+                    indexed_vertices(vertices)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+                let indexed =
+                    !indices.is_empty() && indexing_saves_space(unique.len(), &indices, vertices);
                 let data = if indexed { unique.as_slice() } else { vertices };
                 let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("Model vertices"),
                     contents: bytemuck::cast_slice(data),
-                    usage: wgpu::BufferUsages::VERTEX,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 });
                 let index_buffer = indexed.then(|| {
                     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -383,8 +558,13 @@ impl GpuState {
                         usage: wgpu::BufferUsages::INDEX,
                     })
                 });
-                GeometryChunk {
+                Some(GeometryChunk {
                     vertices: buffer,
+                    material: device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("Material"),
+                        contents: bytemuck::bytes_of(&PackedMaterial::from(batch.material)),
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    }),
                     indices: index_buffer,
                     count: vertices.len() as u32,
                     topology: batch.topology as usize
@@ -392,27 +572,48 @@ impl GpuState {
                         + usize::from(batch.blend) * 6,
                     texture: batch_index,
                     blend: batch.blend,
-                    center: vertices.iter().fold(glam::Vec3::ZERO, |sum, v| {
-                        sum + glam::Vec3::from_array(v.position) / vertices.len() as f32
-                    }),
-                }
+                    center: if batch.blend {
+                        chunk_center(vertices)
+                    } else {
+                        glam::Vec3::ZERO
+                    },
+                })
             })
             .collect()
     }
 
     pub(crate) fn load_mesh(&mut self, mesh: &mesh::Mesh) {
-        self.animation = mesh.animation.clone();
-        self.animation_start = std::time::Instant::now();
-        if Arc::ptr_eq(&self.mesh_storage, &mesh.vertices) {
-            return;
-        }
+        let revision = self.upload_worker.latest.fetch_add(1, Ordering::SeqCst) + 1;
         let cached = self
             .geometry_cache
             .iter()
             .position(|(storage, _)| Arc::ptr_eq(storage, &mesh.vertices))
-            .and_then(|i| self.geometry_cache.remove(i));
-        let previous = std::mem::take(&mut self.vertex_buffers);
-        // Retain at most two small meshes; large models release their GPU storage immediately.
+            .and_then(|i| self.geometry_cache.remove(i))
+            .map(|(_, buffers)| buffers);
+        self.uploading = self
+            .upload_worker
+            .jobs
+            .send(UploadJob {
+                revision,
+                mesh: mesh.clone(),
+                cached,
+            })
+            .is_ok();
+    }
+
+    pub(crate) fn cancel_upload(&mut self) {
+        self.upload_worker.cancel();
+        self.uploading = false;
+    }
+    pub(crate) fn is_loading(&self) -> bool {
+        self.uploading
+    }
+
+    pub(crate) fn accept_upload(&mut self, prepared: PreparedMesh) -> bool {
+        if prepared.revision != self.upload_worker.latest.load(Ordering::SeqCst) {
+            return false;
+        }
+        let previous = std::mem::replace(&mut self.vertex_buffers, prepared.geometry);
         if self.mesh_storage.len() * std::mem::size_of::<mesh::Vertex>() <= 32 * 1024 * 1024 {
             self.geometry_cache
                 .push_back((self.mesh_storage.clone(), previous));
@@ -420,13 +621,15 @@ impl GpuState {
         while self.geometry_cache.len() > 2 {
             self.geometry_cache.pop_front();
         }
-        self.vertex_buffers = cached
-            .map(|(_, buffers)| buffers)
-            .unwrap_or_else(|| Self::create_vertex_buffers(&self.device, mesh));
-        self.mesh_storage = mesh.vertices.clone();
-        self.num_vertices = mesh.vertices.len() as u32;
-        self.textures =
-            Self::create_textures(&self.device, &self.queue, &self.texture_layout, mesh);
+        self.animation = prepared.mesh.animation;
+        self.animation_time = 0.;
+        self.last_animation_frame = std::time::Instant::now();
+        self.animation_paused = false;
+        self.mesh_storage = prepared.mesh.vertices;
+        self.num_vertices = self.mesh_storage.len() as u32;
+        self.textures = prepared.textures;
+        self.uploading = false;
+        true
     }
 
     fn texture_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
@@ -458,6 +661,15 @@ impl GpuState {
         layout: &wgpu::BindGroupLayout,
         mesh: &mesh::Mesh,
     ) -> Vec<wgpu::BindGroup> {
+        Self::create_textures_cancellable(device, queue, layout, mesh, || true).unwrap()
+    }
+    fn create_textures_cancellable(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        mesh: &mesh::Mesh,
+        is_current: impl Fn() -> bool,
+    ) -> Option<Vec<wgpu::BindGroup>> {
         let white = mesh::Texture {
             width: 1,
             height: 1,
@@ -474,6 +686,9 @@ impl GpuState {
             .into_iter()
             .chain(mesh.textures.iter())
             .map(|image| {
+                if !is_current() {
+                    return None;
+                }
                 let size = wgpu::Extent3d {
                     width: image.width,
                     height: image.height,
@@ -518,9 +733,9 @@ impl GpuState {
                     min_filter: filter(image.linear[1]),
                     ..Default::default()
                 });
-                (texture, sampler)
+                Some((texture, sampler))
             })
-            .collect();
+            .collect::<Option<Vec<_>>>()?;
         let maps: Vec<[Option<usize>; 5]> = if mesh.batches.is_empty() {
             vec![[None; 5]]
         } else {
@@ -531,6 +746,9 @@ impl GpuState {
         };
         maps.iter()
             .map(|maps| {
+                if !is_current() {
+                    return None;
+                }
                 let indices: [usize; 5] = std::array::from_fn(|slot| {
                     maps[slot].map_or(usize::from(slot == 2), |i| i + 2)
                 });
@@ -560,11 +778,11 @@ impl GpuState {
                         },
                     })
                     .collect();
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("Material maps"),
                     layout,
                     entries: &entries,
-                })
+                }))
             })
             .collect()
     }
@@ -587,8 +805,16 @@ impl GpuState {
         ordered
     }
 
-    pub(crate) fn is_animated(&self) -> bool {
+    pub(crate) fn reset_animation_clock(&mut self) {
+        self.last_animation_frame = std::time::Instant::now();
+    }
+
+    pub(crate) fn has_animation(&self) -> bool {
         self.animation.is_some()
+    }
+
+    pub(crate) fn is_animated(&self) -> bool {
+        self.animation.is_some() && !self.animation_paused
     }
 
     fn create_depth_texture(
@@ -675,15 +901,40 @@ impl GpuState {
         scene_left: u32,
         is_dark: bool,
     ) {
+        let now = std::time::Instant::now();
+        if !self.animation_paused {
+            self.animation_time += (now - self.last_animation_frame).as_secs_f32();
+        }
+        self.last_animation_frame = now;
         if let Some(animation) = &self.animation {
-            match animation.evaluate(self.animation_start.elapsed().as_secs_f32()) {
-                Ok(mesh) => {
-                    self.vertex_buffers = Self::create_vertex_buffers(&self.device, &mesh);
-                    self.num_vertices = mesh.vertices.len() as u32;
-                }
-                Err(error) => {
-                    log::error!("Animation failed: {error}");
-                    self.animation = None;
+            if !self.animation_paused {
+                match animation.evaluate(self.animation_time) {
+                    Ok(mesh) => {
+                        let mut offset = 0;
+                        for chunk in &mut self.vertex_buffers {
+                            let vertices = &mesh.vertices[offset..offset + chunk.count as usize];
+                            self.queue.write_buffer(
+                                &chunk.vertices,
+                                0,
+                                bytemuck::cast_slice(vertices),
+                            );
+                            self.queue.write_buffer(
+                                &chunk.material,
+                                0,
+                                bytemuck::bytes_of(&PackedMaterial::from(
+                                    mesh.batches[chunk.texture].material,
+                                )),
+                            );
+                            if chunk.blend {
+                                chunk.center = chunk_center(vertices);
+                            }
+                            offset += chunk.count as usize;
+                        }
+                    }
+                    Err(error) => {
+                        log::error!("Animation failed: {error}");
+                        self.animation = None;
+                    }
                 }
             }
         }
@@ -805,6 +1056,7 @@ impl GpuState {
                     pass.set_pipeline(&self.pipeline[chunk.topology]);
                     pass.set_bind_group(1, &self.textures[chunk.texture], &[]);
                     pass.set_vertex_buffer(0, chunk.vertices.slice(..));
+                    pass.set_vertex_buffer(1, chunk.material.slice(..));
                     if let Some(indices) = &chunk.indices {
                         pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..chunk.count, 0, 0..1);
@@ -841,11 +1093,68 @@ impl GpuState {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+        log::debug!("CPU frame submission: {:?}", now.elapsed());
 
         for id in &textures_delta.free {
             self.egui_renderer.free_texture(id);
         }
     }
+}
+
+// Accessor identity avoids hashing every UV/color attribute. Flat face normals,
+// generated tangents, and shader edge corners still need distinct vertices.
+fn indexed_source_vertices(
+    vertices: &[mesh::Vertex],
+    source: &[u32],
+) -> (Vec<mesh::Vertex>, Vec<u32>) {
+    let mut lookup = std::collections::HashMap::new();
+    let mut unique = Vec::new();
+    let mut indices = Vec::with_capacity(vertices.len());
+    for (i, (vertex, source)) in vertices.iter().zip(source).enumerate() {
+        let key = (
+            *source,
+            vertex.normal.map(f32::to_bits),
+            vertex.tangent.map(f32::to_bits),
+            i % 3,
+        );
+        let index = *lookup.entry(key).or_insert_with(|| {
+            while unique.len() % 3 != i % 3 {
+                unique.push(*vertex);
+            }
+            let index = unique.len() as u32;
+            unique.push(*vertex);
+            index
+        });
+        indices.push(index);
+    }
+    (unique, indices)
+}
+
+fn chunk_center(vertices: &[mesh::Vertex]) -> glam::Vec3 {
+    vertices.iter().fold(glam::Vec3::ZERO, |sum, vertex| {
+        sum + glam::Vec3::from_array(vertex.position) / vertices.len() as f32
+    })
+}
+
+fn indexing_saves_space(unique_count: usize, indices: &[u32], expanded: &[mesh::Vertex]) -> bool {
+    unique_count * std::mem::size_of::<mesh::Vertex>() + std::mem::size_of_val(indices)
+        < std::mem::size_of_val(expanded)
+}
+
+fn should_deduplicate(vertices: &[mesh::Vertex]) -> bool {
+    const SAMPLE_WINDOWS: usize = 4;
+    const WINDOW_VERTICES: usize = 768;
+    if vertices.len() <= SAMPLE_WINDOWS * WINDOW_VERTICES * 2 {
+        return true;
+    }
+    // Sample local reuse throughout the chunk. Start on triangle boundaries so
+    // the sample uses the same corner identities as the full indexing pass.
+    (0..SAMPLE_WINDOWS).any(|window| {
+        let start = ((vertices.len() - WINDOW_VERTICES) / 3 * window / (SAMPLE_WINDOWS - 1)) * 3;
+        let sample = &vertices[start..start + WINDOW_VERTICES];
+        let (unique, indices) = indexed_vertices(sample);
+        indexing_saves_space(unique.len(), &indices, sample)
+    })
 }
 
 // Cap individual uploads at 64 MiB even on devices supporting larger buffers.
@@ -859,10 +1168,7 @@ fn indexed_vertices(vertices: &[mesh::Vertex]) -> (Vec<mesh::Vertex>, Vec<u32>) 
             vertex.normal.map(f32::to_bits),
             vertex.color.map(f32::to_bits),
             vertex.uv.map(f32::to_bits),
-            vertex.surface.map(f32::to_bits),
-            vertex.emissive.map(f32::to_bits),
             vertex.map_uv.map(|uv| uv.map(f32::to_bits)),
-            vertex.map_factors.map(f32::to_bits),
             vertex.tangent.map(f32::to_bits),
             i % 3,
         );
@@ -978,3 +1284,133 @@ fn material_shader_and_all_primitive_pipelines_validate() {
 
 #[cfg(test)]
 mod sample_tests;
+
+#[cfg(test)]
+#[test]
+fn source_indices_preserve_flat_normals_and_edge_corners() {
+    let a = mesh::Vertex::default();
+    let b = mesh::Vertex {
+        normal: [1., 0., 0.],
+        ..a
+    };
+    let vertices = [a, a, a, a, a, a, b, b, b];
+    let (unique, indices) = indexed_source_vertices(&vertices, &[0; 9]);
+    for (i, index) in indices.iter().enumerate() {
+        assert_eq!(
+            bytemuck::bytes_of(&unique[*index as usize]),
+            bytemuck::bytes_of(&vertices[i])
+        );
+        assert_eq!(*index as usize % 3, i % 3);
+    }
+    assert_eq!(indices[0], indices[3]);
+    assert_ne!(indices[0], indices[6]);
+}
+
+#[cfg(test)]
+#[test]
+fn uploads_run_off_thread_and_cancel_between_chunks() {
+    let instance = wgpu::Instance::default();
+    let Some(adapter) =
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+    else {
+        return;
+    };
+    let (device, queue) =
+        pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
+            .unwrap();
+    let device = Arc::new(device);
+    let queue = Arc::new(queue);
+    let layout = Arc::new(GpuState::texture_bind_group_layout(&device));
+    device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let (delivery, received) = mpsc::channel();
+    let main_thread = std::thread::current().id();
+    let worker = UploadWorker::with_delivery(
+        device.clone(),
+        queue.clone(),
+        layout.clone(),
+        move |prepared| {
+            delivery
+                .send((std::thread::current().id(), prepared))
+                .is_ok()
+        },
+    );
+    let revision = worker.latest.fetch_add(1, Ordering::SeqCst) + 1;
+    let mut mesh = mesh::Mesh::empty();
+    let chunk_size = vertex_chunk_size(device.limits().max_buffer_size).min(196_608);
+    mesh.vertices = Arc::new(vec![mesh::Vertex::default(); chunk_size + 3]);
+    worker
+        .jobs
+        .send(UploadJob {
+            revision,
+            mesh: mesh.clone(),
+            cached: None,
+        })
+        .unwrap();
+    let (upload_thread, prepared) = received
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .unwrap();
+    assert_ne!(upload_thread, main_thread);
+    assert_eq!(prepared.revision, revision);
+    assert_eq!(prepared.geometry.len(), 2);
+    assert_eq!(
+        prepared
+            .geometry
+            .iter()
+            .map(|c| c.count as usize)
+            .sum::<usize>(),
+        mesh.vertices.len()
+    );
+    assert_eq!(prepared.textures.len(), 1);
+    worker.cancel();
+    assert_ne!(prepared.revision, worker.latest.load(Ordering::SeqCst));
+
+    // A queued superseded request must never replace the newer selection.
+    let newest = worker.latest.load(Ordering::SeqCst);
+    worker
+        .jobs
+        .send(UploadJob {
+            revision,
+            mesh: mesh.clone(),
+            cached: None,
+        })
+        .unwrap();
+    worker
+        .jobs
+        .send(UploadJob {
+            revision: newest,
+            mesh: mesh.clone(),
+            cached: None,
+        })
+        .unwrap();
+    let (_, replacement) = received
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .unwrap();
+    assert_eq!(replacement.revision, newest);
+
+    // Cancel after the first chunk has been prepared, before the second starts.
+    let checks = std::cell::Cell::new(0);
+    let cancelled = GpuState::create_vertex_buffers_cancellable(&device, &mesh, || {
+        checks.set(checks.get() + 1);
+        checks.get() == 1
+    });
+    assert!(cancelled.is_none());
+    assert_eq!(checks.get(), 2);
+    assert!(
+        GpuState::create_textures_cancellable(&device, &queue, &layout, &mesh, || false).is_none()
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn large_chunks_skip_deduplication_when_vertices_are_unique() {
+    let mut vertices: Vec<_> = (0..12_288)
+        .map(|i| mesh::Vertex {
+            position: [i as f32, 0., 0.],
+            ..Default::default()
+        })
+        .collect();
+    assert!(!should_deduplicate(&vertices));
+    // A region with high reuse near the end must still get indexed.
+    vertices[11_520..].fill(mesh::Vertex::default());
+    assert!(should_deduplicate(&vertices));
+}

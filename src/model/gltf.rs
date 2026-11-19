@@ -1,5 +1,6 @@
 mod legacy;
 mod pointer;
+mod resources;
 use super::Result;
 use crate::mesh::Mesh;
 use glam::{Mat4, Vec3};
@@ -9,24 +10,16 @@ pub(super) fn load(path: &Path) -> Result<Mesh> {
     let (source, pointer_targets) = pointer::parse(&crate::mesh::read_limited(path)?)?;
     let doc = source.document;
     let mut blob = source.blob;
+    let mut resources = resources::Resources::new();
+    let base = path.parent().unwrap_or(Path::new("."));
     let mut buffers = Vec::new();
     for buffer in doc.buffers() {
-        let data = gltf::buffer::Data::from_source_and_blob(
-            buffer.source(),
-            path.parent(),
-            &mut blob,
-        )
-        .map_err(|error| match buffer.source() {
-            gltf::buffer::Source::Uri(uri) if !uri.starts_with("data:") => {
-                let hint = if matches!(&error, gltf::Error::Io(e) if e.kind() == std::io::ErrorKind::NotFound) {
-                    " Keep the .gltf file and its companion files together, preserving their relative paths, or open the .glb version instead."
-                } else {
-                    ""
-                };
-                format!("Could not load glTF buffer {uri:?} relative to {}: {error}.{hint}", path.parent().unwrap_or(Path::new(".")).display())
+        let data = gltf::buffer::Data(match buffer.source() {
+            gltf::buffer::Source::Uri(uri) => resources.uri(uri, base)?,
+            gltf::buffer::Source::Bin => {
+                resources.blob(blob.take().ok_or("Missing GLB buffer")?)?
             }
-            _ => format!("Could not load glTF buffer {}: {error}", buffer.index()),
-        })?;
+        });
         // Preserve the validation performed by gltf::import_buffers.
         if data.len() < buffer.length() {
             return Err(gltf::Error::BufferLength {
@@ -40,8 +33,7 @@ pub(super) fn load(path: &Path) -> Result<Mesh> {
     }
     let mut textures = Vec::new();
     for texture in doc.textures() {
-        let image =
-            gltf::image::Data::from_source(texture.source().source(), path.parent(), &buffers)?;
+        let image = resources.image(texture.source().source(), base, &buffers)?;
         use gltf::image::Format;
         let (channels, bytes) = match image.format {
             Format::R8 => (1, 1),
@@ -514,7 +506,25 @@ impl Scene {
                         | gltf::mesh::Mode::LineStrip => 1,
                         _ => 0,
                     };
+                    let batch_material = crate::mesh::Material {
+                        metallic,
+                        roughness,
+                        alpha: match material.alpha_mode() {
+                            gltf::material::AlphaMode::Opaque => crate::mesh::AlphaMode::Opaque,
+                            gltf::material::AlphaMode::Blend => crate::mesh::AlphaMode::Blend,
+                            gltf::material::AlphaMode::Mask => {
+                                crate::mesh::AlphaMode::Mask(alpha_cutoff)
+                            }
+                        },
+                        unlit: material.unlit() || topology != 0,
+                        emissive,
+                        map_factors: [
+                            normal_texture.as_ref().map_or(0., |t| t.scale()),
+                            occlusion_texture.as_ref().map_or(1., |t| t.strength()),
+                        ],
+                    };
                     let start = output.vertices.len();
+                    let mut source_indices = Vec::new();
                     let mut emit = |ids: &[usize]| -> Result<()> {
                         if output.vertices.len().is_multiple_of(3072) {
                             crate::mesh::check_cancelled()?;
@@ -540,28 +550,9 @@ impl Scene {
                                 tangent: tangent.unwrap_or([0.; 4]),
                                 color: color.to_array(),
                                 uv: uv.get(i).copied().unwrap_or([0.; 2]),
-                                surface: [
-                                    metallic,
-                                    roughness,
-                                    if material.alpha_mode() == gltf::material::AlphaMode::Mask {
-                                        alpha_cutoff
-                                    } else if material.alpha_mode()
-                                        == gltf::material::AlphaMode::Opaque
-                                    {
-                                        -2.
-                                    } else {
-                                        -1.
-                                    },
-                                    f32::from(material.unlit() || topology != 0),
-                                ],
-                                emissive,
                                 map_uv: std::array::from_fn(|slot| {
                                     map_uv[slot].get(i).copied().unwrap_or([0.; 2])
                                 }),
-                                map_factors: [
-                                    normal_texture.as_ref().map_or(0., |t| t.scale()),
-                                    occlusion_texture.as_ref().map_or(1., |t| t.strength()),
-                                ],
                             });
                         }
                         if topology == 0 && world.determinant() < 0. {
@@ -580,6 +571,11 @@ impl Scene {
                                 v.normal = n;
                             }
                         }
+                        let mut source = ids.to_vec();
+                        if topology == 0 && world.determinant() < 0. {
+                            source.swap(1, 2);
+                        }
+                        source_indices.extend(source.into_iter().map(|i| i as u32));
                         for v in vertices {
                             output.bounds_min = output.bounds_min.min(v.position.into());
                             output.bounds_max = output.bounds_max.max(v.position.into());
@@ -634,8 +630,14 @@ impl Scene {
                         }
                     }
                     output.batches.push(crate::mesh::Batch {
+                        source_indices: Some(std::sync::Arc::new(source_indices)),
+                        material: batch_material,
                         range: start..output.vertices.len(),
-                        topology,
+                        topology: match topology {
+                            0 => crate::mesh::Topology::Triangles,
+                            1 => crate::mesh::Topology::Lines,
+                            _ => crate::mesh::Topology::Points,
+                        },
                         texture: texture.map(|t| t.texture().index()),
                         maps: [
                             mr_texture.map(|t| t.texture().index()),
@@ -949,8 +951,14 @@ mod rendering_tests {
     fn material_and_joint_animation_are_preserved_and_loop() {
         let (dir, mesh) = animated_asset(4);
         assert_eq!(mesh.vertices[0].color, [1., 0.2, 0.1, 1.]);
-        assert_eq!(&mesh.vertices[0].surface[..2], &[0.3, 0.7]);
-        assert_eq!(mesh.vertices[0].emissive, [0.1, 0., 0.]);
+        assert_eq!(
+            &[
+                mesh.batches[0].material.metallic,
+                mesh.batches[0].material.roughness
+            ],
+            &[0.3, 0.7]
+        );
+        assert_eq!(mesh.batches[0].material.emissive, [0.1, 0., 0.]);
         let scene = mesh.animation.as_ref().unwrap();
         let animated = scene.evaluate(1.).unwrap();
         assert_eq!(animated.vertices[0].position, [1., 0., 0.]);
@@ -968,7 +976,7 @@ mod rendering_tests {
         for (mode, topology, count) in [(0, 2, 3), (2, 1, 6), (3, 1, 4), (5, 0, 3), (6, 0, 3)] {
             let (dir, mesh) = animated_asset(mode);
             assert_eq!(mesh.vertices.len(), count);
-            assert_eq!(mesh.batches[0].topology, topology);
+            assert_eq!(mesh.batches[0].topology as u8, topology);
             assert_eq!(mesh.batches[0].range, 0..count);
             assert_eq!(
                 mesh.animation.unwrap().evaluate(1.).unwrap().vertices[0].position,
@@ -989,7 +997,7 @@ mod material_regressions {
     #[test]
     fn unlit_materials_and_texture_uv_sets_are_preserved() {
         let unlit = fixture("UnlitTest");
-        assert!(unlit.vertices.iter().all(|v| v.surface[3] == 1.));
+        assert!(unlit.batches.iter().all(|b| b.material.unlit));
         assert!(unlit.batches.iter().all(|b| !b.double_sided));
         let multi = fixture("MultiUVTest");
         assert_eq!(multi.batches[0].texture, Some(0));

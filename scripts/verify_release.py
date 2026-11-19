@@ -59,13 +59,17 @@ def verify_windows(asset):
     destroy_icon.argtypes = [wintypes.HICON]
     destroy_icon.restype = wintypes.BOOL
 
-    # A negative index selects the numeric resource ID declared in build.rs.
+    # A negative index selects the resource ID declared in build.rs.
+    # Avoid -1, which ExtractIconExW also uses for icon-count queries.
+    resource_id = 101
     icon = wintypes.HICON()
-    count = extract_icon(str(asset), -1, ctypes.byref(icon), None, 1)
+    count = extract_icon(str(asset), -resource_id, ctypes.byref(icon), None, 1)
     if icon:
         destroy_icon(icon)
     if count != 1 or not icon:
-        raise SystemExit("The Windows executable is missing a readable application icon at ID 1.")
+        raise SystemExit(
+            f"The Windows executable is missing a readable application icon at ID {resource_id}."
+        )
 
 
 if __name__ == "__main__":

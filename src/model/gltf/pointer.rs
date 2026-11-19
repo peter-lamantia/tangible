@@ -226,22 +226,27 @@ mod tests {
             root["materials"][0]["alphaMode"] = "MASK".into();
             std::fs::write(&path, gltf::json::serialize::to_vec(&root).unwrap()).unwrap();
             let mesh = crate::model::load_model(&path).unwrap();
-            let animated = mesh.batches.last().unwrap().range.start;
-            let vertex = mesh.vertices[animated];
             let value = match property {
-                "pbrMetallicRoughness/metallicFactor" => vertex.surface[0],
-                "pbrMetallicRoughness/roughnessFactor" => vertex.surface[1],
-                "alphaCutoff" => vertex.surface[2],
-                _ => vertex.emissive[0],
+                "pbrMetallicRoughness/metallicFactor" => {
+                    mesh.batches.last().unwrap().material.metallic
+                }
+                "pbrMetallicRoughness/roughnessFactor" => {
+                    mesh.batches.last().unwrap().material.roughness
+                }
+                "alphaCutoff" => mesh.batches.last().unwrap().material.alpha.cutoff(),
+                _ => mesh.batches.last().unwrap().material.emissive[0],
             };
             assert!((value - 0.8).abs() < 1e-6, "{property}: {value}");
             let later = mesh.animation.unwrap().evaluate(0.5).unwrap();
-            let vertex = later.vertices[animated];
             let value = match property {
-                "pbrMetallicRoughness/metallicFactor" => vertex.surface[0],
-                "pbrMetallicRoughness/roughnessFactor" => vertex.surface[1],
-                "alphaCutoff" => vertex.surface[2],
-                _ => vertex.emissive[0],
+                "pbrMetallicRoughness/metallicFactor" => {
+                    later.batches.last().unwrap().material.metallic
+                }
+                "pbrMetallicRoughness/roughnessFactor" => {
+                    later.batches.last().unwrap().material.roughness
+                }
+                "alphaCutoff" => later.batches.last().unwrap().material.alpha.cutoff(),
+                _ => later.batches.last().unwrap().material.emissive[0],
             };
             assert!((value - 0.02).abs() < 1e-6, "{property}: {value}");
         }
