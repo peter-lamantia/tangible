@@ -71,8 +71,6 @@ CI; GPU compatibility still depends on the device and its drivers.
   in the disk image, then launch Tangible from Applications. Current release
   disk images are signed with Developer ID and include Apple's notarization ticket.
 - **Linux:** Run `chmod +x tangible-linux-*` and launch the downloaded executable.
-  The app includes a window icon for X11 and XWayland. Native Wayland launchers
-  get their icons from installed desktop entries.
 
 Linux source builds also require the Wayland, xkbcommon, and GTK 3 development
 packages (on Debian/Ubuntu: `libwayland-dev libxkbcommon-dev libgtk-3-dev`).

@@ -2685,7 +2685,6 @@ dependencies = [
  "env_logger",
  "glam",
  "gltf",
- "image",
  "log",
  "ply-rs",
  "pollster 0.3.0",

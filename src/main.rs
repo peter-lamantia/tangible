@@ -84,19 +84,6 @@ impl ApplicationHandler<AppEvent> for Viewer {
                 .with_window_icon(Some(icon.clone()))
                 .with_taskbar_icon(Some(icon))
         };
-        #[cfg(target_os = "linux")]
-        let attributes = {
-            let icon = image::load_from_memory_with_format(
-                include_bytes!("../assets/app-icon.png"),
-                image::ImageFormat::Png,
-            )
-            .expect("Invalid Linux application icon")
-            .into_rgba8();
-            let (width, height) = icon.dimensions();
-            let icon = winit::window::Icon::from_rgba(icon.into_raw(), width, height)
-                .expect("Invalid Linux application icon dimensions");
-            attributes.with_window_icon(Some(icon))
-        };
         let window = Arc::new(
             event_loop
                 .create_window(attributes)
