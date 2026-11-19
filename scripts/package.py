@@ -47,7 +47,9 @@ if "macos" in name:
         ]
 
     with tempfile.TemporaryDirectory() as directory:
-        app = pathlib.Path(directory) / "Tangible.app"
+        staging = pathlib.Path(directory)
+        (staging / "Applications").symlink_to("/Applications")
+        app = staging / "Tangible.app"
         contents = app / "Contents"
         executable = contents / "MacOS" / "tangible"
         executable.parent.mkdir(parents=True)

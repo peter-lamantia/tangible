@@ -67,9 +67,9 @@ CI; GPU compatibility still depends on the device and its drivers.
   reports a missing `VCRUNTIME140.dll` or `MSVCP140.dll`, use a newer build or
   install Microsoft's [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
   for your executable's architecture. Graphics drivers are still required.
-- **macOS:** Open the `.dmg`, drag `Tangible.app` to Applications, and launch it.
-  Current release disk images are signed with Developer ID and include Apple's
-  notarization ticket.
+- **macOS:** Open the `.dmg`, drag `Tangible.app` onto the Applications shortcut
+  in the disk image, then launch Tangible from Applications. Current release
+  disk images are signed with Developer ID and include Apple's notarization ticket.
 - **Linux:** Run `chmod +x tangible-linux-*` and launch the downloaded executable.
   The app includes a window icon for X11 and XWayland. Native Wayland launchers
   get their icons from installed desktop entries.
