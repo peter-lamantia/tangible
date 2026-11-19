@@ -50,8 +50,10 @@ cargo build --release
 
 ## Releases
 
-Each push to `main` publishes builds for Linux and Windows on x86-64 and ARM64,
-and macOS on Intel and Apple silicon, on the [Releases page](https://github.com/peter-lamantia/tangible/releases).
+After all CI jobs pass on a push to `main`, GitHub publishes builds for Linux and
+Windows on x86-64 and ARM64, and macOS on Intel and Apple silicon, on the
+[Releases page](https://github.com/peter-lamantia/tangible/releases). To start
+the same process manually, run the CI workflow on `main`.
 Download the asset for your platform. GitHub shows the SHA-256 digest for each
 release asset. macOS builds are DMG disk images; Linux and Windows builds are
 executables.
