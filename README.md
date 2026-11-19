@@ -22,7 +22,7 @@ A simple, cross-platform 3D file viewer written in Rust.
 
 ### From releases
 
-Simply go to the releases page, and download and run the corresponding package!
+Simply go to the [releases page](https://github.com/peter-lamantia/tangible/releases/latest), and download and run the corresponding package!
 
 ### From source
 
