@@ -21,6 +21,12 @@ quick-xml = "0.41"
 gltf = { version = "1.4.1", features = ["import", "KHR_materials_unlit", "KHR_texture_transform"] }
 ply-rs = "0.1.3"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[build-dependencies]
+embed-resource = "3"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

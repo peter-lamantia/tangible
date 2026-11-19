@@ -71,13 +71,35 @@ impl ApplicationHandler<AppEvent> for Viewer {
         if self.handle_event.is_some() {
             return;
         }
+        let attributes = Window::default_attributes()
+            .with_title("Tangible")
+            .with_inner_size(LogicalSize::new(1280.0, 720.0));
+        #[cfg(windows)]
+        let attributes = {
+            use winit::platform::windows::{IconExtWindows, WindowAttributesExtWindows};
+            use winit::window::Icon;
+
+            let icon = Icon::from_resource(1, None).expect("Invalid Windows application icon");
+            attributes
+                .with_window_icon(Some(icon.clone()))
+                .with_taskbar_icon(Some(icon))
+        };
+        #[cfg(target_os = "linux")]
+        let attributes = {
+            let icon = image::load_from_memory_with_format(
+                include_bytes!("../assets/app-icon.png"),
+                image::ImageFormat::Png,
+            )
+            .expect("Invalid Linux application icon")
+            .into_rgba8();
+            let (width, height) = icon.dimensions();
+            let icon = winit::window::Icon::from_rgba(icon.into_raw(), width, height)
+                .expect("Invalid Linux application icon dimensions");
+            attributes.with_window_icon(Some(icon))
+        };
         let window = Arc::new(
             event_loop
-                .create_window(
-                    Window::default_attributes()
-                        .with_title("Tangible")
-                        .with_inner_size(LogicalSize::new(1280.0, 720.0)),
-                )
+                .create_window(attributes)
                 .expect("Failed to create window"),
         );
         self.handle_event = initialize_viewer(window, self.initial_path.take(), self.proxy.clone());

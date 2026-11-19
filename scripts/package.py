@@ -52,11 +52,16 @@ if "macos" in name:
         executable = contents / "MacOS" / "tangible"
         executable.parent.mkdir(parents=True)
         shutil.copy2(binary, executable)
+        resources = contents / "Resources"
+        resources.mkdir()
+        icon = pathlib.Path(__file__).resolve().parents[1] / "assets" / "app-icon.icns"
+        shutil.copy2(icon, resources / icon.name)
         with (contents / "Info.plist").open("wb") as output:
             plistlib.dump({
                 "CFBundleName": "Tangible",
                 "CFBundleIdentifier": "com.tangible.viewer",
                 "CFBundleExecutable": "tangible",
+                "CFBundleIconFile": icon.name,
                 "CFBundlePackageType": "APPL",
             }, output)
         if signing_identity:

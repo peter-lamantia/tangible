@@ -8,3 +8,7 @@ recolored in fuchsia, trimmed, and rasterized for use in Tangible.
 The adapted SVG (`impossible_cube_fuchsia.svg`) and its rasterized RGBA version
 (`impossible_cube_fuchsia.rgba`) are licensed under
 [Creative Commons Attribution-ShareAlike 3.0 Unported](https://creativecommons.org/licenses/by-sa/3.0/).
+
+The application icons (`app-icon.png`, `app-icon.ico`, and `app-icon.icns`)
+use the same adapted SVG on a rounded black background and are licensed under
+the same terms.
