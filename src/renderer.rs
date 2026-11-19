@@ -75,7 +75,8 @@ struct UploadJob {
 }
 
 struct UploadWorker {
-    jobs: mpsc::Sender<UploadJob>,
+    jobs: Option<mpsc::Sender<UploadJob>>,
+    thread: Option<std::thread::JoinHandle<()>>,
     latest: Arc<AtomicU64>,
 }
 impl UploadWorker {
@@ -98,7 +99,7 @@ impl UploadWorker {
         let (jobs, receiver) = mpsc::channel::<UploadJob>();
         let latest = Arc::new(AtomicU64::new(0));
         let current = latest.clone();
-        std::thread::spawn(move || {
+        let thread = std::thread::spawn(move || {
             while let Ok(mut job) = receiver.recv() {
                 // Keep only the newest queued mesh (including rapid plate changes).
                 while let Ok(next) = receiver.try_recv() {
@@ -146,7 +147,17 @@ impl UploadWorker {
                 }
             }
         });
-        Self { jobs, latest }
+        Self {
+            jobs: Some(jobs),
+            thread: Some(thread),
+            latest,
+        }
+    }
+    fn send(&self, job: UploadJob) -> Result<(), mpsc::SendError<UploadJob>> {
+        self.jobs
+            .as_ref()
+            .expect("upload worker is running")
+            .send(job)
     }
     fn cancel(&self) {
         self.latest.fetch_add(1, Ordering::SeqCst);
@@ -155,17 +166,25 @@ impl UploadWorker {
 impl Drop for UploadWorker {
     fn drop(&mut self) {
         self.cancel();
+        // Disconnect the channel before joining so an idle worker can wake up.
+        drop(self.jobs.take());
+        if let Some(thread) = self.thread.take() {
+            if thread.join().is_err() {
+                log::error!("GPU upload worker panicked");
+            }
+        }
     }
 }
 
 pub(crate) struct GpuState {
+    // Drop the worker before the active graphics resources.
+    upload_worker: UploadWorker,
     surface: wgpu::Surface<'static>,
     device: Arc<wgpu::Device>,
     queue: Arc<wgpu::Queue>,
     pub(crate) config: wgpu::SurfaceConfiguration,
     pipeline: Vec<wgpu::RenderPipeline>,
     texture_layout: Arc<wgpu::BindGroupLayout>,
-    upload_worker: UploadWorker,
     uploading: bool,
     textures: Vec<wgpu::BindGroup>,
     animation: Option<Arc<crate::model::gltf::Scene>>,
@@ -592,7 +611,6 @@ impl GpuState {
             .map(|(_, buffers)| buffers);
         self.uploading = self
             .upload_worker
-            .jobs
             .send(UploadJob {
                 revision,
                 mesh: mesh.clone(),
@@ -1339,7 +1357,6 @@ fn uploads_run_off_thread_and_cancel_between_chunks() {
     let chunk_size = vertex_chunk_size(device.limits().max_buffer_size).min(196_608);
     mesh.vertices = Arc::new(vec![mesh::Vertex::default(); chunk_size + 3]);
     worker
-        .jobs
         .send(UploadJob {
             revision,
             mesh: mesh.clone(),
@@ -1367,7 +1384,6 @@ fn uploads_run_off_thread_and_cancel_between_chunks() {
     // A queued superseded request must never replace the newer selection.
     let newest = worker.latest.load(Ordering::SeqCst);
     worker
-        .jobs
         .send(UploadJob {
             revision,
             mesh: mesh.clone(),
@@ -1375,7 +1391,6 @@ fn uploads_run_off_thread_and_cancel_between_chunks() {
         })
         .unwrap();
     worker
-        .jobs
         .send(UploadJob {
             revision: newest,
             mesh: mesh.clone(),
@@ -1398,6 +1413,14 @@ fn uploads_run_off_thread_and_cancel_between_chunks() {
     assert!(
         GpuState::create_textures_cancellable(&device, &queue, &layout, &mesh, || false).is_none()
     );
+
+    drop(worker);
+    assert_eq!(
+        received.try_recv().unwrap_err(),
+        mpsc::TryRecvError::Disconnected
+    );
+    device.poll(wgpu::Maintain::Wait);
+    assert!(pollster::block_on(device.pop_error_scope()).is_none());
 }
 
 #[cfg(test)]
