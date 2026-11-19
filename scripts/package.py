@@ -1,5 +1,4 @@
-"""Prepare platform release assets and their checksums."""
-import hashlib
+"""Prepare platform release assets."""
 import json
 import os
 import pathlib
@@ -77,6 +76,3 @@ if "macos" in name:
 else:
     release_asset = pathlib.Path(name + binary.suffix)
     shutil.copy2(binary, release_asset)
-release_asset.with_name(release_asset.name + ".sha256").write_text(
-    f"{hashlib.sha256(release_asset.read_bytes()).hexdigest()}  {release_asset.name}\n"
-)

@@ -36,15 +36,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libwayland-dev libxkbcommon-dev libgtk-3-dev
       - name: Build
         run: cargo build --release --locked
-      - name: Prepare release asset and checksum
+      - name: Prepare release asset
         shell: bash
         run: python scripts/package.py "${{ matrix.artifact }}" "target/release/${{ matrix.binary }}"
       - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
-          path: |
-            ${{ matrix.artifact }}${{ runner.os == 'Windows' && '.exe' || '' }}
-            ${{ matrix.artifact }}${{ runner.os == 'Windows' && '.exe' || '' }}.sha256
+          path: ${{ matrix.artifact }}${{ runner.os == 'Windows' && '.exe' || '' }}
           if-no-files-found: error
 
   build-macos:
@@ -108,9 +106,7 @@ jobs:
       - uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.artifact }}
-          path: |
-            ${{ matrix.artifact }}.dmg
-            ${{ matrix.artifact }}.dmg.sha256
+          path: ${{ matrix.artifact }}.dmg
           if-no-files-found: error
 
   release:

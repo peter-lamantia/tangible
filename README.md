@@ -52,8 +52,9 @@ cargo build --release
 
 Each push to `main` publishes builds for Linux and Windows on x86-64 and ARM64,
 and macOS on Intel and Apple silicon, on the [Releases page](https://github.com/peter-lamantia/tangible/releases).
-Download the asset for your platform and its SHA-256 checksum. macOS builds are
-DMG disk images; Linux and Windows builds are executables.
+Download the asset for your platform. GitHub shows the SHA-256 digest for each
+release asset. macOS builds are DMG disk images; Linux and Windows builds are
+executables.
 Choose `x86_64` for Intel or AMD processors and `arm64` for ARM processors,
 including Apple silicon. These additional architectures are built and tested in
 CI; GPU compatibility still depends on the device and its drivers.
