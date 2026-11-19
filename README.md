@@ -2,30 +2,32 @@
 
 # Tangible
 
-A simple, cross-platform STL, OBJ, 3MF, OFF, PLY, glTF, and GLB file viewer written in Rust.
+A simple, cross-platform 3D file viewer written in Rust.
 
 ![Tangible UI](/assets/tangible-ui.png)
 
 ## Features
 
+- **STL, OBJ, 3MF, OFF, PLY, glTF & GLB support**
 - **Cross-platform** — runs natively on Windows, macOS, and Linux
-- **GUI File Opening** — native file dialog (`rfd`), top bar button, and drag-and-drop
 - **GPU-accelerated** — uses `wgpu` (Vulkan / Metal / DX12)
-- **STL, OBJ, 3MF, OFF, PLY, glTF & GLB** — geometry from common 3D model formats. glTF/GLB displays base-color, metallic/roughness, normal, occlusion, and emissive textures with separate UV sets; vertex colors; unlit materials; UV transforms; triangle/line/point primitives, skinned meshes, and morph targets. The first animation plays automatically in a loop (translation, rotation, and scale; step, linear, and cubic spline interpolation).
-- **Idle rendering** — static models redraw on interaction and scheduled UI updates; the event loop sleeps between updates. Playing glTF animations continue rendering until paused.
-- **Antialiasing** — 4× MSAA enabled by default on supported GPUs
-- **3MF plate selection** — shaded square previews for all plates and each individual plate, with a resizable and collapsible panel
-- **Responsive loading** — background parsing, GPU preparation, and progressive plate previews; the most recently opened file takes priority
+- **3MF plate selection** — previews for each plate, with a resizable and collapsible panel
 - **Model details** — displays filename, triangle/vertex counts, and bounding box dimensions
-- **Playback controls** — pause and resume the first glTF animation with the Pause checkbox
+- **glTF playback controls** — pause and resume the first glTF animation with the Pause checkbox
 - **Saved preferences** — theme, projection, and window size are restored after closing normally
-- **Projection toggle** — switch between Perspective and Orthographic using the segmented control beside the theme selector
+- **Perspective/Orthographic projection**
+- **Light/dark mode**
 
 ## Usage
 
-You can launch the viewer with or without a file:
+### From releases
 
-The welcome-screen cube starts at rest; click or drag it to interact with it.
+Simply go to the releases page, and download and run the corresponding package!
+
+### From source
+
+Requires rust installation. Linux source builds also require the Wayland, xkbcommon, and GTK 3 development
+packages (on Debian/Ubuntu: `libwayland-dev libxkbcommon-dev libgtk-3-dev`).
 
 ```bash
 # Launch GUI directly (open files via button, dialog, or drag-and-drop)
@@ -35,152 +37,14 @@ cargo run --release
 cargo run --release -- path/to/model.obj
 ```
 
-## Building
-
-```bash
-# Debug build
-cargo build
-
-# Release build (recommended)
-cargo build --release
-```
-
-### Platform Requirements
+## Requirements
 
 - **Linux**: Vulkan-capable GPU + drivers (`mesa-vulkan-drivers` or proprietary)
 - **macOS**: Metal-capable GPU (any Mac from 2012+)
 - **Windows**: DX12 or Vulkan-capable GPU
 
-## Releases
-
-After all CI jobs pass on a push to `main`, GitHub publishes builds for Linux and
-Windows on x86-64 and ARM64, and macOS on Intel and Apple silicon, on the
-[Releases page](https://github.com/peter-lamantia/tangible/releases). To start
-the same process manually, run the CI workflow on `main`.
-Download the asset for your platform. GitHub shows the SHA-256 digest for each
-release asset. macOS builds are DMG disk images; Linux and Windows builds are
-executables.
-Choose `x86_64` for Intel or AMD processors and `arm64` for ARM processors,
-including Apple silicon. These additional architectures are built and tested in
-CI; GPU compatibility still depends on the device and its drivers.
-
-- **Windows:** Run the downloaded `.exe` file.
-  Windows MSVC builds statically link the Visual C++ runtime, so a separate
-  Visual C++ Redistributable installation is not required. If an older download
-  reports a missing `VCRUNTIME140.dll` or `MSVCP140.dll`, use a newer build or
-  install Microsoft's [Visual C++ Redistributable](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist)
-  for your executable's architecture. Graphics drivers are still required.
-- **macOS:** Open the `.dmg`, drag `Tangible.app` onto the Applications shortcut
-  in the disk image, then launch Tangible from Applications. Current release
-  disk images are signed with Developer ID and include Apple's notarization ticket.
-- **Linux:** Run `chmod +x tangible-linux-*` and launch the downloaded executable.
-
-Linux source builds also require the Wayland, xkbcommon, and GTK 3 development
-packages (on Debian/Ubuntu: `libwayland-dev libxkbcommon-dev libgtk-3-dev`).
-
-## Source layout
-
-- `src/main.rs`: window, application state, input, and main UI composition
-- `src/renderer.rs`: GPU resources and rendering
-- `src/loading.rs`: background loading, request tracking, and preview delivery
-- `src/preview.rs`: cancellable CPU plate previews
-- `src/mesh.rs`: shared geometry and validation
-- `src/model.rs`, `src/model/obj.rs`, `src/model/three_mf.rs`, and `src/stl.rs`: format loading
-- `src/ui.rs` and `src/theme.rs`: UI helpers and styling
-
-Model loaders build render geometry directly to reduce temporary memory use. PLY streams records from disk; glTF/GLB loads geometry buffers and referenced material textures. Large meshes still require CPU geometry and GPU storage.
-
-Models support up to 10 million expanded triangles. Large models are uploaded in GPU buffer chunks on a background worker; memory use still scales with triangle count. The current model remains visible until the replacement GPU resources are ready. Superseded uploads stop between chunks or textures, and the loading indicator stays visible through GPU preparation.
-
-Large-model performance: mesh copies share immutable vertex storage. The renderer samples large vertex chunks without source indices before attempting deduplication. It keeps indexed geometry when it reduces upload size and caches up to two recently viewed meshes of at most 32 MiB each. Plate thumbnails retain four-sample antialiasing with incremental rasterization. Release builds enable thin LTO.
-
-## glTF regression tests
-
-The loader tests use a small, pinned subset of
-[Khronos glTF Sample Assets](https://github.com/KhronosGroup/glTF-Sample-Assets).
-Run `cargo test --locked --all-targets` to check external and embedded buffers,
-GLB, non-indexed geometry, interleaved attributes, and sparse accessors offline.
-Fixture provenance, licenses, and coverage are in
-[tests/fixtures/gltf-sample-assets/README.md](tests/fixtures/gltf-sample-assets/README.md).
-Additional tests cover primitive modes, material attributes, animation, skinning, and GPU pipeline validation.
-
-Legacy glTF 1.0 and GLB 1.0 static models are also supported, including named
-resources, node transforms, and embedded textures. Legacy diffuse colors/textures
-and shininess are approximated with the current material renderer; custom GLSL
-techniques are not executed. Legacy animation and skinning require conversion
-to glTF 2.0.
-
-The `KHR_animation_pointer` extension supports node transforms/morph weights and
-material base color, emissive, metallic, roughness, and alpha-cutoff factors
-with floating-point output accessors. Other pointer targets report a specific
-unsupported-target error.
-
-glTF rendering uses approximate direct lighting, with core material texture maps,
-`KHR_materials_unlit`, and `KHR_texture_transform` on base-color,
-metallic/roughness, and emissive maps. Single-sided materials cull back faces;
-transparent chunks render after opaque surfaces, sorted back to front with depth
-writes disabled. Intersecting triangles within one chunk remain an approximation.
-Authored tangent vectors and their handedness are preserved through skinning,
-morphing, and mirrored transforms; meshes without tangents derive a basis from UVs.
-Other material extensions, environment lighting, mipmaps, and animation selection
-controls are not yet supported. Texture dimensions are limited to 8192 pixels;
-animation currently evaluates geometry on the CPU and updates reusable GPU buffers, so large animated
-models can be expensive.
-
-To repeat the 20-model GPU rendering check against a local Khronos checkout:
-
-```bash
-TANGIBLE_GLTF_SAMPLES=/path/to/glTF-Sample-Assets/Models \
-  cargo test --locked render_twenty_khronos_models -- --ignored --nocapture
-```
-
-Use `render_twenty_more_khronos_models` for a second set of 20 different models,
-including recursive skeletons, normal/tangent mirrors, sparse accessors, URI edge
-cases, and texture encoding. Use the filter `render_twenty` to run both sets.
-
-This opt-in test loads 20 named models, evaluates animation at four times, checks
-finite geometry, and renders three frames per model using the viewer's GPU
-pipelines. It checks nonempty pixel readback and GPU validation, and writes
-`results.tsv` and PPM frames under `batch-1` / `batch-2` in
-`/tmp/tangible-gltf-samples` (override with
-`TANGIBLE_GLTF_OUTPUT`). Native window/UI checks are separate from this offscreen
-test.
-
-When opening `.gltf` files, keep companion buffers (such as `.bin` files) in
-their original relative locations. Missing-buffer errors identify the resource
-and its base directory. Use the `.glb` variant for a bundled model file.
-Load errors appear in a scrollable popup at the bottom right, with buttons to
-copy the full message or dismiss it.
-
-## Resource use and measurements
-
-Material factors are shared per draw batch; vertices occupy 96 bytes rather than
-132 bytes. Static geometry uses bounded GPU deduplication. glTF retains source accessor
-indices to avoid hashing all vertex attributes when building GPU index buffers. Animated geometry
-keeps stable non-indexed GPU buffers and updates their contents each frame.
-CPU animation evaluation still allocates geometry each frame.
-
-glTF companion buffers, encoded image resources, and decoded RGBA images share a
-512 MiB budget. Image decoding limits dimensions to 8192 pixels and applies the
-remaining allocation budget. Cancellation is checked between resource imports.
+## Configuration
 
 Preferences are saved on normal window close in `tangible/preferences` beneath
 `%APPDATA%` on Windows, `~/Library/Application Support` on macOS, and
 `$XDG_CONFIG_HOME` (or `~/.config`) on Linux.
-
-To measure parsing time, resident geometry/texture bytes, and average CPU animation
-evaluation time for local representative files:
-
-```bash
-TANGIBLE_BENCH_MODELS='/path/model.stl:/path/model.glb' \
-  cargo test --release --locked benchmark_models -- --ignored --nocapture
-```
-
-Use semicolons between paths on Windows. These figures report geometry storage,
-not peak process memory. On Linux, wrap the command with `/usr/bin/time -v` to
-also inspect maximum resident memory. Use the offscreen GPU checks above to
-validate rendering separately.
-
-Set `RUST_LOG=tangible=debug` when running the viewer to log background GPU preparation and
-CPU frame submission durations. These timings include CPU preparation and queue
-submission, not completed GPU execution time.
